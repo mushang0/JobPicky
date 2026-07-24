@@ -122,11 +122,11 @@ def test_daily_workflow_updates_local_before_pull_and_sync(monkeypatch, tmp_path
 
     result = run_daily_workflow(_config(), tmp_path / "jobs.sqlite")
 
-    assert events == ["fetch", "enrich", "pull", "sync", "notify"]
+    assert events == ["fetch", "pull", "sync", "notify"]
     assert result.status == "success"
     assert result.fetched_count == result.created_count == result.matched_count == result.recommended_count == 1
     assert result.unchanged_count == 0
-    assert result.link_enriched_count == 1
+    assert result.link_enriched_count == 0
     assert result.feishu_pull_attempted is result.feishu_pull_succeeded is True
     assert result.feishu_created_count == 1
     assert result.notification_status == "sent"
@@ -161,7 +161,7 @@ def test_pull_failure_blocks_sync_but_returns_stage_error(monkeypatch, tmp_path:
     assert result.errors == (DailyStageError("feishu_pull", "feishu_pull_failed", "飞书状态回拉失败"),)
 
 
-def test_no_feishu_skips_pull_sync_and_notification_but_keeps_enrichment(monkeypatch, tmp_path: Path):
+def test_no_feishu_skips_pull_sync_and_notification(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(scanning, "WonderCVCrawler", _Crawler)
     monkeypatch.setattr(
         scanning,
@@ -181,7 +181,42 @@ def test_no_feishu_skips_pull_sync_and_notification_but_keeps_enrichment(monkeyp
     assert result.notification_status == "skipped"
     assert result.notification_attempted is False
     assert result.notification_sent is False
+    assert result.link_enriched_count == 0
+
+
+def test_daily_workflow_uses_givemeoc_links_and_does_not_search(monkeypatch, tmp_path: Path):
+    class GiveMeOCCrawler:
+        def __init__(self, config, cancel_check=None, progress=None):
+            pass
+
+        def crawl(self, jobs, mode="daily"):
+            from jobpicky.givemeoc import GiveMeOCCrawlResult, GiveMeOCRecord
+
+            return GiveMeOCCrawlResult(
+                records=(GiveMeOCRecord(
+                    source_record_id="oc-1",
+                    company="Example",
+                    company_normalized="example",
+                    announcement_url="https://mp.weixin.qq.com/s/example",
+                    official_url="https://careers.example.com/apply",
+                ),),
+                pages_scanned=1,
+                complete=True,
+            )
+
+    monkeypatch.setattr(scanning, "WonderCVCrawler", _Crawler)
+    monkeypatch.setattr(scanning, "GiveMeOCCrawler", GiveMeOCCrawler)
+    monkeypatch.setattr(scanning, "OfficialUrlFinder", lambda: (_ for _ in ()).throw(AssertionError("search must not run")))
+    config = _config(feishu=False)
+    config["givemeoc"] = {"enabled": True}
+
+    result = run_daily_workflow(config, tmp_path / "jobs.sqlite")
+    row = JobRepository(tmp_path / "jobs.sqlite").list_all_jobs()[0]
+
     assert result.link_enriched_count == 1
+    assert row["announcement_url"] == "https://mp.weixin.qq.com/s/example"
+    assert row["official_url"] == "https://careers.example.com/apply"
+    assert row["official_url_source"] == "givemeoc"
 
 
 def test_process_failure_identifies_the_failed_stage(monkeypatch, tmp_path: Path):

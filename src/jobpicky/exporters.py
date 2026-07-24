@@ -127,7 +127,13 @@ def _normalize_all_job_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(row)
     normalized.setdefault("job_id", row.get("id"))
     normalized.setdefault("title", row.get("clean_title") or row.get("title"))
-    normalized.setdefault("original_url", row.get("detail_url") or row.get("source_url"))
+    if "announcement_url" in row:
+        normalized.setdefault("original_url", row.get("announcement_url"))
+    else:
+        normalized.setdefault("original_url", row.get("detail_url"))
+    if row.get("official_url_source") not in (None, "givemeoc"):
+        normalized["official_url"] = None
+    normalized["apply_url"] = None
     normalized.setdefault("recommendation_status", "推荐" if row.get("recommendation_date") else "不推荐")
     normalized.setdefault("recommendation_date", row.get("recommendation_date"))
     normalized.setdefault("recommend_reason", row.get("recommend_reason") or "")

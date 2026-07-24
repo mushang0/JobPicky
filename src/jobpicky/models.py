@@ -63,6 +63,10 @@ class Job:
     extraction_version: str | None = None
     apply_url: str | None = None
     official_url: str | None = None
+    announcement_url: str | None = None
+    announcement_url_source: str | None = None
+    official_url_source: str | None = None
+    givemeoc_record_id: str | None = None
     # Directly constructed jobs (tests/imports) are treated as complete; the
     # WonderCV list parser explicitly marks discovery records as list_only.
     parse_status: str = "detail_ready"
@@ -111,6 +115,10 @@ class Job:
             "extraction_version": self.extraction_version,
             "apply_url": self.apply_url,
             "official_url": self.official_url,
+            "announcement_url": self.announcement_url,
+            "announcement_url_source": self.announcement_url_source,
+            "official_url_source": self.official_url_source,
+            "givemeoc_record_id": self.givemeoc_record_id,
             "parse_status": self.parse_status,
             "parse_note": self.parse_note,
             "first_seen": self.first_seen or now,

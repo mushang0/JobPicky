@@ -4,6 +4,7 @@ import logging
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from ..alerts import build_daily_message
 from ..error_safety import known_secrets, redact_text, safe_exception_detail
 from ..feishu import FeishuBitableClient, FeishuBot, FeishuConfig
 from ..official_search import OfficialUrlFinder
+from ..givemeoc import GiveMeOCCrawler, GiveMeOCRecord, apply_givemeoc_links
 from ..core import DailyUpdateService, JobIngestionService, MatchingService, RecommendationService
 from ..pipeline import enrich_official_urls, pull_user_states_from_feishu
 from ..run_guard import DailyRunGuard, DailyRunInProgress
@@ -22,6 +24,11 @@ from .synchronization import SyncSummary, sync_feishu
 
 
 DailyStatus = Literal["success", "partial_success", "failed"]
+
+
+def _public_scan_detail(value: str | None) -> str:
+    """Keep source-specific crawler names out of user-facing progress text."""
+    return (value or "").replace("WonderCV", "招聘数据源").replace("wondercv", "招聘数据源")
 
 
 def run_daily_with_jobs(
@@ -192,7 +199,7 @@ def run_daily_workflow(
             )
             if hasattr(crawler, "progress"):
                 crawler.progress = lambda detail: reporter.stage(
-                    "daily", 2, 6, "扫描 WonderCV 新岗位", detail=detail,
+                    "daily", 2, 6, "获取最新招聘公告", detail=_public_scan_detail(detail),
                 )
             last_run_date = repo.get_last_successful_run_date("daily")
 
@@ -211,7 +218,7 @@ def run_daily_workflow(
                     and all(not job.collected_date or job.collected_date < last_run_date for job in page_jobs)
                 )
 
-            reporter.stage("daily", 2, 6, "扫描 WonderCV 新岗位")
+            reporter.stage("daily", 2, 6, "获取最新招聘公告")
             try:
                 crawl = crawler.crawl(mode="daily", should_stop=should_stop)
             except Exception as exc:
@@ -222,7 +229,7 @@ def run_daily_workflow(
                     pull_attempted=pull_attempted, pull_succeeded=pull_succeeded,
                     pull_updated=pull_updated, pull_skipped=pull_skipped, pull_unknown=pull_unknown,
                 )
-            reporter.stage("daily", 2, 6, "扫描 WonderCV 新岗位", "done", f"抓取 {len(crawl.jobs)} 条")
+            reporter.stage("daily", 2, 6, "获取最新招聘公告", "done", f"抓取 {len(crawl.jobs)} 条")
             source_attempted, source_succeeded, source_failed = _crawl_source_counts(crawl)
             if crawl.error or source_failed:
                 code = "fetch_partial" if crawl.jobs else "fetch_failed"
@@ -242,6 +249,65 @@ def run_daily_workflow(
                     pull_updated=pull_updated, pull_skipped=pull_skipped, pull_unknown=pull_unknown,
                 )
 
+            if config.get("givemeoc", {}).get("enabled", False):
+                try:
+                    givemeoc = GiveMeOCCrawler(
+                        config,
+                        cancel_check=is_cancelled,
+                        progress=lambda detail: reporter.stage(
+                            "daily", 2, 6, "核对公告与官方投递入口", detail=detail,
+                        ),
+                    )
+                    cached_records = tuple(
+                        GiveMeOCRecord(
+                            source_record_id=str(row.get("source_record_id") or ""),
+                            company=str(row.get("company") or ""),
+                            company_normalized=str(row.get("company_normalized") or ""),
+                            recruitment_type=str(row.get("recruitment_type") or ""),
+                            target_graduate_year=str(row.get("target_graduate_year") or ""),
+                            city=str(row.get("city") or ""),
+                            deadline=str(row.get("deadline") or ""),
+                            updated_at=str(row.get("updated_at") or ""),
+                            announcement_url=row.get("announcement_url"),
+                            official_url=row.get("official_url"),
+                        )
+                        for row in repo.list_givemeoc_records()
+                    )
+                    if hasattr(givemeoc, "set_cache"):
+                        givemeoc.set_cache(cached_records, repo.givemeoc_cache_initialized())
+                    link_result = givemeoc.crawl(crawl.jobs, mode="daily")
+                    repo.save_givemeoc_records(
+                        (asdict(record) for record in link_result.records),
+                        complete=link_result.complete,
+                        total_pages=getattr(link_result, "total_pages", 0),
+                        pages_scanned=link_result.pages_scanned,
+                    )
+                    # The crawl is incremental, but the link match is deliberately
+                    # against every stored WonderCV job and the complete cache.
+                    jobs_by_key = {
+                        job.dedupe_key: job
+                        for job in (repo.job_from_row(row) for row in repo.list_stored_jobs())
+                        if job.dedupe_key
+                    }
+                    jobs_by_key.update({job.dedupe_key: job for job in crawl.jobs if job.dedupe_key})
+                    link_jobs = list(jobs_by_key.values()) + [job for job in crawl.jobs if not job.dedupe_key]
+                    matched_links = apply_givemeoc_links(
+                        link_jobs,
+                        link_result,
+                        config.get("system_taxonomy", {}).get("company_aliases", {}),
+                    )
+                    repo.reconcile_givemeoc_links(link_jobs, complete=link_result.complete)
+                    enrich_summary = SimpleNamespace(
+                        items_seen=len({job.company_normalized or job.company for job in crawl.jobs}),
+                        updated_items=matched_links,
+                    )
+                    if link_result.error:
+                        errors.append(_stage_error("link_enrichment", "link_enrichment_failed", "公告与投递入口核对失败"))
+                    reporter.stage("daily", 2, 6, "核对公告与官方投递入口", "done", f"已核对 {matched_links} 个公司")
+                except Exception as exc:
+                    logging.warning("GiveMeOC link reconciliation failed: %s", safe_exception_detail(exc, config))
+                    errors.append(_stage_error("link_enrichment", "link_enrichment_failed", "公告与投递入口核对失败"))
+
             reporter.stage("daily", 3, 6, "标准化、增量写入并匹配岗位")
             try:
                 summary = run_daily_with_jobs(repo, crawl.jobs, config)
@@ -256,22 +322,7 @@ def run_daily_workflow(
             reporter.stage("daily", 3, 6, "标准化、增量写入并匹配岗位", "done", f"新推荐 {summary.recommended_items} 条")
             notification_rows = _notification_rows(repo.list_all_jobs(), config)
 
-            # Link enrichment is a local post-processing policy and is independent
-            # of whether Feishu is configured.
-            reporter.stage("daily", 4, 6, "补全官方投递链接")
-            try:
-                enrich_summary = enrich_official_urls(
-                    repo,
-                    OfficialUrlFinder(),
-                    only_recommended=True,
-                    progress=lambda detail: reporter.stage(
-                        "daily", 4, 6, "补全官方投递链接", detail=detail,
-                    ),
-                )
-                reporter.stage("daily", 4, 6, "补全官方投递链接", "done", f"更新 {enrich_summary.updated_items} 条")
-            except Exception as exc:
-                logging.warning("Official URL enrichment failed: %s", safe_exception_detail(exc, config))
-                errors.append(_stage_error("link_enrichment", "link_enrichment_failed", "官方投递链接补全失败"))
+            reporter.stage("daily", 4, 6, "整理可用的公告与投递信息", "done")
 
             if feishu_enabled and not is_cancelled():
                 reporter.stage("daily", 5, 6, "回拉并同步飞书")

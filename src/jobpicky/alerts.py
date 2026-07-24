@@ -18,7 +18,8 @@ def build_daily_message(total_new: int, relevant_rows: list[dict[str, Any]], err
         company = row.get("company") or "未知公司"
         title = row.get("title") or row.get("clean_title") or "未命名公告"
         city = row.get("city") or "城市待确认"
-        link = row.get("original_url") or row.get("detail_url") or row.get("apply_url") or ""
+        official_url = row.get("official_url") if row.get("official_url_source") == "givemeoc" else ""
+        link = row.get("original_url") or official_url or ""
         lines.extend(
             [
                 "",

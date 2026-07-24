@@ -29,6 +29,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "min_interval_seconds": 2,
         "max_interval_seconds": 5,
     },
+    "givemeoc": {
+        "enabled": True,
+        # 0 follows the newest pages until a complete cached page is reached.
+        "max_pages_init": 0,
+        "max_pages_daily": 0,
+        "stop_when_page_cached": True,
+        "min_interval_seconds": 0.2,
+    },
     "user_profile": {
         "graduate_years": [],
         "batches": list(ONBOARDING_BATCH_OPTIONS),

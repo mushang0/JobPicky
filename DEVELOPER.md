@@ -212,3 +212,17 @@ python scripts/release_check.py
 发布 PyPI 时更新 `pyproject.toml`、`src/jobpicky/__init__.py` 和 tag 的版本号，然后推送形如 `v0.2.0` 的 tag。GitHub Actions 会先运行测试和 Windows 发布验收，再使用 PyPI Trusted Publishing 上传 wheel 和 sdist。
 
 提交前确认没有凭据、运行数据、临时目录或无关格式化变更。GitHub Actions 的普通测试和发布验收应复用上述入口；不要重新在 workflow 中堆叠独立的 wheel 构建、venv 安装、`pip check` 或 smoke 命令。
+## GitHub Release
+
+1. `git fetch origin`，将功能分支合入 `main`。
+2. 运行 `python -m pytest -q` 和 `python scripts/release_check.py`。
+3. 依次推送 `main`、带注释的版本 tag：
+
+   ```powershell
+   git push origin main
+   git tag -a vX.Y.Z -m "JobPicky vX.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+4. tag 不会自动生成 GitHub Release。用 GitHub REST API `POST /repos/{owner}/{repo}/releases` 创建 Release，正文读取对应的 `docs/release-notes/vX.Y.Z.md`。
+5. 用 `git ls-remote origin` 和 Release API 回读确认远端状态。大对象推送超时时先运行 `git gc` 再重试。

@@ -35,7 +35,9 @@ _SCHEMA_COLUMNS: dict[str, dict[str, str]] = {
         "collected_date": "DATE", "deadline": "DATE", "company_type": "TEXT", "industry": "TEXT",
         "tags": "TEXT", "job_tags": "TEXT", "special_marks": "TEXT", "raw_tags": "TEXT", "raw_text": "TEXT",
         "role_text": "TEXT", "announcement_text": "TEXT", "role_signals": "TEXT", "field_evidence": "TEXT",
-        "extraction_version": "TEXT", "apply_url": "TEXT", "official_url": "TEXT", "parse_status": "TEXT",
+        "extraction_version": "TEXT", "apply_url": "TEXT", "official_url": "TEXT",
+        "announcement_url": "TEXT", "announcement_url_source": "TEXT", "official_url_source": "TEXT",
+        "givemeoc_record_id": "TEXT", "parse_status": "TEXT",
         "parse_note": "TEXT", "first_seen": "DATETIME", "last_seen": "DATETIME", "last_checked": "DATETIME",
         "content_hash": "TEXT", "is_active": "INTEGER",
     },
@@ -140,6 +142,10 @@ class JobRepository:
                     extraction_version TEXT,
                     apply_url TEXT,
                     official_url TEXT,
+                    announcement_url TEXT,
+                    announcement_url_source TEXT,
+                    official_url_source TEXT,
+                    givemeoc_record_id TEXT,
                     parse_status TEXT,
                     parse_note TEXT,
                     first_seen DATETIME,
@@ -249,6 +255,7 @@ class JobRepository:
                 CREATE INDEX IF NOT EXISTS idx_job_positions_job_id ON job_positions(job_id);
                 """
             )
+            self._ensure_givemeoc_schema(conn)
             self._ensure_columns(conn, "jobs", {
                 "raw_title": "TEXT",
                 "raw_company": "TEXT",
@@ -256,6 +263,10 @@ class JobRepository:
                 "summary": "TEXT",
                 "location_text": "TEXT",
                 "official_url": "TEXT",
+                "announcement_url": "TEXT",
+                "announcement_url_source": "TEXT",
+                "official_url_source": "TEXT",
+                "givemeoc_record_id": "TEXT",
                 "job_tags": "TEXT",
                 "special_marks": "TEXT",
                 "raw_tags": "TEXT",
@@ -295,11 +306,45 @@ class JobRepository:
             for table, columns in _SCHEMA_COLUMNS.items():
                 self._ensure_columns(conn, table, columns)
 
+    @staticmethod
+    def _ensure_givemeoc_schema(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS givemeoc_records (
+                source_record_id TEXT PRIMARY KEY,
+                company TEXT NOT NULL,
+                company_normalized TEXT,
+                recruitment_type TEXT,
+                target_graduate_year TEXT,
+                city TEXT,
+                deadline TEXT,
+                updated_at TEXT,
+                announcement_url TEXT,
+                official_url TEXT,
+                last_seen_at DATETIME NOT NULL,
+                last_seen_page INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_givemeoc_records_company
+                ON givemeoc_records(company_normalized);
+            CREATE TABLE IF NOT EXISTS givemeoc_scan_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                cache_initialized INTEGER NOT NULL DEFAULT 0,
+                total_pages INTEGER NOT NULL DEFAULT 0,
+                pages_scanned INTEGER NOT NULL DEFAULT 0,
+                last_full_scan_at DATETIME,
+                last_incremental_scan_at DATETIME,
+                updated_at DATETIME NOT NULL
+            );
+            """
+        )
+
     def init_schema(self) -> None:
         if not self.db_path.exists():
             self._apply_schema_in_place()
             return
         if not self._schema_needs_upgrade():
+            with self.connect() as conn:
+                self._ensure_givemeoc_schema(conn)
             return
 
         BackupService(self.db_path.parent / "backups").backup_sqlite(self.db_path, source="schema-upgrade")
@@ -401,7 +446,8 @@ class JobRepository:
                     "batch", "target_graduate_year", "degree", "city", "location_text", "location_status", "deadline",
                     "job_tags", "raw_text", "role_text", "announcement_text", "role_signals",
                     "field_evidence", "extraction_version", "apply_url", "parse_status", "parse_note",
-                    "content_hash",
+                    "content_hash", "announcement_url", "announcement_url_source", "official_url_source",
+                    "givemeoc_record_id",
                 }
                 for field in protected:
                     values[field] = before[field]
@@ -427,7 +473,8 @@ class JobRepository:
                     "company", "title", "clean_title", "summary", "batch", "target_graduate_year",
                     "degree", "city", "location_status", "deadline", "apply_url", "official_url", "raw_text",
                     "role_text", "announcement_text", "role_signals", "field_evidence",
-                    "extraction_version", "parse_status", "content_hash",
+                    "extraction_version", "parse_status", "content_hash", "announcement_url",
+                    "announcement_url_source", "official_url_source", "givemeoc_record_id",
                 )
                 changed = any(
                     before[field]
@@ -838,9 +885,15 @@ class JobRepository:
                 jobs.city,
                 jobs.summary,
                 recommended_jobs.recommend_reason,
-                COALESCE(jobs.detail_url, jobs.source_url) AS original_url,
+                CASE WHEN jobs.announcement_url_source = 'givemeoc' THEN jobs.announcement_url END AS original_url,
+                COALESCE(jobs.detail_url, jobs.source_url) AS legacy_detail_url,
                 jobs.apply_url,
                 jobs.official_url,
+                CASE WHEN jobs.official_url_source = 'givemeoc' THEN jobs.official_url END AS verified_official_url,
+                CASE WHEN jobs.announcement_url_source = 'givemeoc' THEN jobs.announcement_url END AS verified_announcement_url,
+                jobs.announcement_url,
+                jobs.official_url_source,
+                jobs.announcement_url_source,
                 COALESCE(job_matches.verify_status, '') AS verify_status,
                 COALESCE(job_user_state.status, '未看') AS user_status,
                 COALESCE(job_user_state.note, '') AS note
@@ -880,9 +933,15 @@ class JobRepository:
                 jobs.raw_text,
                 jobs.role_text,
                 jobs.announcement_text,
-                COALESCE(jobs.detail_url, jobs.source_url) AS original_url,
+                CASE WHEN jobs.announcement_url_source = 'givemeoc' THEN jobs.announcement_url END AS original_url,
+                COALESCE(jobs.detail_url, jobs.source_url) AS legacy_detail_url,
                 jobs.apply_url,
                 jobs.official_url,
+                CASE WHEN jobs.official_url_source = 'givemeoc' THEN jobs.official_url END AS verified_official_url,
+                CASE WHEN jobs.announcement_url_source = 'givemeoc' THEN jobs.announcement_url END AS verified_announcement_url,
+                jobs.announcement_url,
+                jobs.official_url_source,
+                jobs.announcement_url_source,
                 jobs.parse_status,
                 jobs.first_seen,
                 jobs.last_seen,
@@ -957,6 +1016,150 @@ class JobRepository:
                 (job_id,),
             )
             return True
+
+    def list_givemeoc_records(self) -> list[dict[str, Any]]:
+        """Return the persisted GiveMeOC snapshot used for full matching."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_record_id, company, company_normalized,
+                       recruitment_type, target_graduate_year, city, deadline,
+                       updated_at, announcement_url, official_url
+                FROM givemeoc_records
+                ORDER BY source_record_id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def givemeoc_cache_initialized(self) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT cache_initialized FROM givemeoc_scan_state WHERE id = 1"
+            ).fetchone()
+        return bool(row and row["cache_initialized"])
+
+    def save_givemeoc_records(
+        self,
+        records: Iterable[dict[str, Any]],
+        *,
+        complete: bool,
+        total_pages: int = 0,
+        pages_scanned: int = 0,
+    ) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.connect() as conn:
+            for record in records:
+                source_record_id = str(record.get("source_record_id") or "").strip()
+                company = str(record.get("company") or "").strip()
+                if not source_record_id or not company:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO givemeoc_records (
+                        source_record_id, company, company_normalized,
+                        recruitment_type, target_graduate_year, city, deadline,
+                        updated_at, announcement_url, official_url,
+                        last_seen_at, last_seen_page
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_id) DO UPDATE SET
+                        company=excluded.company,
+                        company_normalized=excluded.company_normalized,
+                        recruitment_type=excluded.recruitment_type,
+                        target_graduate_year=excluded.target_graduate_year,
+                        city=excluded.city,
+                        deadline=excluded.deadline,
+                        updated_at=excluded.updated_at,
+                        announcement_url=COALESCE(excluded.announcement_url, givemeoc_records.announcement_url),
+                        official_url=COALESCE(excluded.official_url, givemeoc_records.official_url),
+                        last_seen_at=excluded.last_seen_at
+                    """,
+                    (
+                        source_record_id,
+                        company,
+                        record.get("company_normalized") or "",
+                        record.get("recruitment_type") or "",
+                        record.get("target_graduate_year") or "",
+                        record.get("city") or "",
+                        record.get("deadline") or "",
+                        record.get("updated_at") or "",
+                        record.get("announcement_url"),
+                        record.get("official_url"),
+                        now,
+                        int(record.get("page") or 0),
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO givemeoc_scan_state (
+                    id, cache_initialized, total_pages, pages_scanned,
+                    last_full_scan_at, last_incremental_scan_at, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    cache_initialized=MAX(givemeoc_scan_state.cache_initialized, excluded.cache_initialized),
+                    total_pages=CASE WHEN excluded.total_pages > 0 THEN excluded.total_pages ELSE givemeoc_scan_state.total_pages END,
+                    pages_scanned=excluded.pages_scanned,
+                    last_full_scan_at=COALESCE(excluded.last_full_scan_at, givemeoc_scan_state.last_full_scan_at),
+                    last_incremental_scan_at=excluded.last_incremental_scan_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    int(complete),
+                    total_pages,
+                    pages_scanned,
+                    now if complete else None,
+                    None if complete else now,
+                    now,
+                ),
+            )
+
+    def reconcile_givemeoc_links(self, jobs: Iterable[Job], *, complete: bool) -> None:
+        """Apply verified source links and clear only stale verified links."""
+        with self.connect() as conn:
+            for job in jobs:
+                if not job.dedupe_key:
+                    continue
+                row = conn.execute(
+                    "SELECT id, official_url, official_url_source, announcement_url, announcement_url_source, givemeoc_record_id "
+                    "FROM jobs WHERE dedupe_key = ?",
+                    (job.dedupe_key,),
+                ).fetchone()
+                if not row:
+                    continue
+                if complete or job.givemeoc_record_id:
+                    conn.execute(
+                        """
+                        UPDATE jobs
+                        SET announcement_url = ?, announcement_url_source = ?,
+                            official_url = ?, official_url_source = ?, givemeoc_record_id = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            job.announcement_url,
+                            job.announcement_url_source,
+                            job.official_url,
+                            job.official_url_source,
+                            job.givemeoc_record_id,
+                            int(row["id"]),
+                        ),
+                    )
+                    if any(
+                        row[field] != value
+                        for field, value in (
+                            ("announcement_url", job.announcement_url),
+                            ("announcement_url_source", job.announcement_url_source),
+                            ("official_url", job.official_url),
+                            ("official_url_source", job.official_url_source),
+                            ("givemeoc_record_id", job.givemeoc_record_id),
+                        )
+                    ):
+                        conn.execute("UPDATE feishu_sync SET sync_status = 'pending' WHERE job_id = ?", (int(row["id"]),))
+                elif row["official_url_source"] == "givemeoc" or row["announcement_url_source"] == "givemeoc":
+                    # Preserve the last verified link until the source reports a complete snapshot.
+                    job.announcement_url = row["announcement_url"]
+                    job.announcement_url_source = row["announcement_url_source"]
+                    job.official_url = row["official_url"]
+                    job.official_url_source = row["official_url_source"]
+                    job.givemeoc_record_id = row["givemeoc_record_id"]
 
     def get_last_successful_run_date(self, run_type: str) -> str | None:
         with self.connect() as conn:

@@ -82,6 +82,7 @@ def test_web_lists_local_jobs_and_health(tmp_path: Path):
     assert "task-step-mark" in app_script.text
     assert "focus.note" not in app_script.text
     assert "偏好信息较完整" not in app_script.text
+    assert 'function renderIntegration(){state.feishuSecretSaved=Boolean(state.preferences?.feishu?.secret_saved);renderIntegrationBase();localStorage.removeItem("jobpicky.feishuGuideStep");setFeishuStep(1)}' in app_script.text
     glass_script = client.get("/static/js/liquid-glass.js")
     assert glass_script.status_code == 200
     assert 'document.addEventListener("pointermove"' in glass_script.text

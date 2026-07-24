@@ -197,10 +197,10 @@ class WebStateService:
         stats = queries.stats()
         for item in items:
             item["card_summary"] = extract_wondercv_card_summary(item.pop("raw_title", "")) or item.get("summary")
-            item["detail_url"] = item.pop("original_url", None)
-            apply_url = str(item.get("apply_url") or "").strip()
-            if not _valid_apply_url(apply_url):
-                item["apply_url"] = None
+            item["announcement_url"] = item.pop("verified_announcement_url", None)
+            item["official_url"] = item.pop("verified_official_url", None)
+            item["detail_url"] = item.pop("legacy_detail_url", None)
+            item["apply_url"] = None
         _, today_recommended_total = repo.search_jobs(
             recommended=True, new_since=today_since, limit=1,
         )
@@ -227,9 +227,10 @@ class WebStateService:
         item = JobRepository(self.paths.database).get_job_detail(job_id)
         if item:
             item["card_summary"] = extract_wondercv_card_summary(item.pop("raw_title", "")) or item.get("summary")
-            item["detail_url"] = item.pop("original_url", None)
-            if not _valid_apply_url(str(item.get("apply_url") or "")):
-                item["apply_url"] = None
+            item["announcement_url"] = item.pop("verified_announcement_url", None)
+            item["official_url"] = item.pop("verified_official_url", None)
+            item["detail_url"] = item.pop("legacy_detail_url", None)
+            item["apply_url"] = None
         return item
 
     def scan_status(self, active_task: dict[str, Any] | None = None,

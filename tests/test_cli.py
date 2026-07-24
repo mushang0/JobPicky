@@ -249,6 +249,8 @@ system_taxonomy:
   important_company_types: []
   important_company_marks: []
   company_aliases: {}
+givemeoc:
+  enabled: true
 feishu:
   bitable_app_token: base
   table_id: tbl
@@ -375,6 +377,8 @@ system_taxonomy:
   important_company_types: []
   important_company_marks: []
   company_aliases: {}
+givemeoc:
+  enabled: true
 feishu:
   bitable_app_token: base
   table_id: tbl
@@ -416,6 +420,24 @@ feishu:
         def find_best(self, job: Job) -> str:
             return "https://careers.example.com/daily"
 
+    class GiveMeOCCrawler:
+        def __init__(self, config, cancel_check=None, progress=None):
+            pass
+
+        def crawl(self, jobs, mode="daily"):
+            from jobpicky.givemeoc import GiveMeOCCrawlResult, GiveMeOCRecord
+
+            return GiveMeOCCrawlResult(
+                records=(GiveMeOCRecord(
+                    source_record_id="oc-daily",
+                    company="DailyCo",
+                    company_normalized="dailyco",
+                    official_url="https://careers.example.com/daily",
+                ),),
+                pages_scanned=1,
+                complete=True,
+            )
+
     class Client:
         def __init__(self, config):
             pass
@@ -439,6 +461,7 @@ feishu:
             return FeishuResult(sent=True)
 
     monkeypatch.setattr("jobpicky.services.scanning.WonderCVCrawler", Crawler)
+    monkeypatch.setattr("jobpicky.services.scanning.GiveMeOCCrawler", GiveMeOCCrawler)
     monkeypatch.setattr("jobpicky.services.scanning.OfficialUrlFinder", Finder)
     monkeypatch.setattr("jobpicky.services.scanning.FeishuBitableClient", Client)
     monkeypatch.setattr("jobpicky.services.scanning.FeishuBot", Bot)
