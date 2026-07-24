@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -23,8 +23,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from jobpicky.config import DEFAULT_CONFIG  # noqa: E402
 from jobpicky.core.ingestion import JobIngestionService  # noqa: E402
-from jobpicky.official_search import OfficialUrlFinder  # noqa: E402
-from jobpicky.pipeline import enrich_official_urls  # noqa: E402
+from jobpicky.givemeoc import (  # noqa: E402
+    GiveMeOCCrawlResult,
+    GiveMeOCRecord,
+    apply_givemeoc_links,
+)
 from jobpicky.storage import JobRepository  # noqa: E402
 from jobpicky.wondercv import EXTRACTION_VERSION, WonderCVCrawler  # noqa: E402
 from scripts.build_seed import build_seed  # noqa: E402
@@ -33,6 +36,7 @@ from scripts.export_seed_source import export_seed_source  # noqa: E402
 
 DEFAULT_DATABASE = ROOT / "src" / "jobpicky" / "resources" / "jobs_seed.sqlite"
 DEFAULT_JSON = ROOT / "src" / "jobpicky" / "resources" / "jobs_seed_source.json"
+DEFAULT_GIVEMEOC_SEED = ROOT / "src" / "jobpicky" / "resources" / "givemeoc_seed.sqlite"
 DEFAULT_WORK_ROOT = ROOT / ".test-results" / "seed-refresh"
 PRIVATE_TABLES = ("job_matches", "recommended_jobs", "job_user_state", "feishu_sync", "scan_runs")
 PUBLIC_TABLES = ("jobs", "job_positions")
@@ -50,6 +54,26 @@ def _date(value: str | None) -> date | None:
     if not value:
         return None
     return date.fromisoformat(value)
+
+
+def _load_givemeoc_seed(path: Path) -> tuple[GiveMeOCRecord, ...]:
+    if not path.is_file():
+        return ()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT source_record_id, company, company_normalized,
+                       recruitment_type, target_graduate_year, city, deadline,
+                       updated_at, announcement_url, official_url
+                FROM givemeoc_records
+                ORDER BY source_record_id
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return ()
+    return tuple(GiveMeOCRecord(**dict(row)) for row in rows)
 
 
 def _snapshot(database: Path, table: str) -> tuple[list[str], list[tuple]]:
@@ -168,8 +192,8 @@ def refresh_seed(
     max_pages: int = 50,
     overlap_days: int = 7,
     max_new_items: int = 200,
+    givemeoc_seed: Path = DEFAULT_GIVEMEOC_SEED,
     crawler_factory=WonderCVCrawler,
-    official_finder_factory=OfficialUrlFinder,
 ) -> dict:
     source_database = source_database.resolve()
     target_json = target_json.resolve()
@@ -233,11 +257,22 @@ def refresh_seed(
             raise RuntimeError(
                 f"refusing unusually large seed growth: {ingestion.new_items} new jobs exceeds {max_new_items}"
             )
-        official_links = enrich_official_urls(
-            repository,
-            official_finder_factory(),
-            only_recommended=False,
-        )
+        givemeoc_records = _load_givemeoc_seed(givemeoc_seed.resolve())
+        givemeoc_links_updated = 0
+        if givemeoc_records:
+            with repository.connect() as connection:
+                stored_rows = [dict(row) for row in connection.execute("SELECT * FROM jobs")]
+            stored_jobs = [repository.job_from_row(row) for row in stored_rows]
+            givemeoc_links_updated = apply_givemeoc_links(
+                stored_jobs,
+                GiveMeOCCrawlResult(
+                    records=givemeoc_records,
+                    pages_scanned=0,
+                    complete=True,
+                ),
+                config.get("system_taxonomy", {}).get("company_aliases", {}),
+            )
+            repository.reconcile_givemeoc_links(stored_jobs, complete=True)
         with repository.connect() as connection:
             connection.execute("DELETE FROM job_positions WHERE job_id IN (SELECT id FROM jobs WHERE date(collected_date) > date(?))", (through_date.isoformat(),))
             connection.execute("DELETE FROM jobs WHERE date(collected_date) > date(?)", (through_date.isoformat(),))
@@ -263,8 +298,10 @@ def refresh_seed(
             "items_seen": ingestion.items_seen,
             "new_items": ingestion.new_items,
             "updated_items": ingestion.updated_items,
-            "official_links_checked": official_links.items_seen,
-            "official_links_updated": official_links.updated_items,
+            "official_links_checked": 0,
+            "official_links_updated": 0,
+            "givemeoc_records_loaded": len(givemeoc_records),
+            "givemeoc_links_updated": givemeoc_links_updated,
             "validation": rebuilt_validation,
             "run_directory": str(run_dir),
             "published": False,
@@ -289,6 +326,7 @@ def main() -> int:
     parser.add_argument("--max-pages", type=int, default=50)
     parser.add_argument("--overlap-days", type=int, default=7)
     parser.add_argument("--max-new-items", type=int, default=200)
+    parser.add_argument("--givemeoc-seed", type=Path, default=DEFAULT_GIVEMEOC_SEED)
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args()
     result = refresh_seed(
@@ -301,6 +339,7 @@ def main() -> int:
         max_pages=args.max_pages,
         overlap_days=args.overlap_days,
         max_new_items=args.max_new_items,
+        givemeoc_seed=args.givemeoc_seed,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

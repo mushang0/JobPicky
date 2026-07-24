@@ -44,11 +44,6 @@ class FakeCrawler:
         return CrawlResult(jobs=list(self.jobs), pages_scanned=2)
 
 
-class FakeOfficialFinder:
-    def find_best(self, job: Job) -> str:
-        return f"https://careers.example.com/{job.company.split()[0]}"
-
-
 def test_refresh_builds_isolated_seed_through_inclusive_date(tmp_path: Path):
     source = tmp_path / "source.sqlite"
     target_json = tmp_path / "official.json"
@@ -63,13 +58,13 @@ def test_refresh_builds_isolated_seed_through_inclusive_date(tmp_path: Path):
         target_database,
         tmp_path / "runs",
         through_date=date(2026, 7, 17),
+        givemeoc_seed=tmp_path / "missing-givemeoc.sqlite",
         crawler_factory=FakeCrawler,
-        official_finder_factory=FakeOfficialFinder,
     )
 
     assert result["new_items"] == 1
-    assert result["official_links_checked"] == 2
-    assert result["official_links_updated"] == 2
+    assert result["official_links_checked"] == 0
+    assert result["official_links_updated"] == 0
     assert result["published"] is False
     assert target_json.read_text(encoding="utf-8") == "old json"
     assert target_database.read_bytes() == b"old database"
@@ -77,11 +72,50 @@ def test_refresh_builds_isolated_seed_through_inclusive_date(tmp_path: Path):
     connection = sqlite3.connect(staged)
     try:
         assert connection.execute("SELECT dedupe_key, official_url FROM jobs ORDER BY dedupe_key").fetchall() == [
-            ("existing", "https://careers.example.com/existing"),
-            ("new", "https://careers.example.com/new"),
+            ("existing", None),
+            ("new", None),
         ]
     finally:
         connection.close()
+
+
+def test_refresh_applies_givemeoc_seed_links_to_staged_job_seed(tmp_path: Path):
+    source = tmp_path / "source.sqlite"
+    target_json = tmp_path / "official.json"
+    target_database = tmp_path / "official.sqlite"
+    givemeoc_seed = tmp_path / "givemeoc_seed.sqlite"
+    _seed(source)
+    link_repository = JobRepository(givemeoc_seed)
+    link_repository.init_schema()
+    link_repository.save_givemeoc_records(
+        [{
+            "source_record_id": "givemeoc-new",
+            "company": "new company",
+            "company_normalized": "newcompany",
+            "official_url": "https://newco.example/jobs",
+        }],
+        complete=True,
+        total_pages=40,
+        pages_scanned=40,
+    )
+
+    result = refresh_seed(
+        source,
+        target_json,
+        target_database,
+        tmp_path / "runs",
+        through_date=date(2026, 7, 17),
+        givemeoc_seed=givemeoc_seed,
+        crawler_factory=FakeCrawler,
+    )
+
+    assert result["givemeoc_records_loaded"] == 1
+    assert result["givemeoc_links_updated"] == 1
+    staged = Path(result["run_directory"]) / "staging" / "jobs_seed.sqlite"
+    with sqlite3.connect(staged) as connection:
+        assert connection.execute(
+            "SELECT official_url, official_url_source, givemeoc_record_id FROM jobs WHERE dedupe_key = 'new'"
+        ).fetchone() == ("https://newco.example/jobs", "givemeoc", "givemeoc-new")
 
 
 def test_refresh_publishes_both_artifacts_after_validation(tmp_path: Path):
@@ -99,8 +133,8 @@ def test_refresh_publishes_both_artifacts_after_validation(tmp_path: Path):
         tmp_path / "runs",
         through_date=date(2026, 7, 17),
         publish=True,
+        givemeoc_seed=tmp_path / "missing-givemeoc.sqlite",
         crawler_factory=FakeCrawler,
-        official_finder_factory=FakeOfficialFinder,
     )
 
     assert json.loads(target_json.read_text(encoding="utf-8"))["format_version"] == 2
@@ -129,9 +163,9 @@ def test_refresh_rejects_invalid_dates_without_publishing(tmp_path: Path):
             target_database,
             tmp_path / "runs",
             through_date=date(2026, 7, 17),
+            givemeoc_seed=tmp_path / "missing-givemeoc.sqlite",
             publish=True,
             crawler_factory=InvalidDateCrawler,
-            official_finder_factory=FakeOfficialFinder,
         )
 
     assert target_json.read_text(encoding="utf-8") == "old json"

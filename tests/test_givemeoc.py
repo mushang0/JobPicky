@@ -1,3 +1,5 @@
+import sqlite3
+
 from jobpicky.givemeoc import (
     GiveMeOCCrawlResult,
     GiveMeOCRecord,
@@ -10,6 +12,7 @@ from jobpicky.givemeoc import (
 )
 from jobpicky.models import Job
 from jobpicky.storage import JobRepository
+from scripts.build_givemeoc_seed import build_givemeoc_seed
 
 
 def test_parse_givemeoc_rows_extracts_links_and_skips_honeypot():
@@ -214,6 +217,55 @@ def test_givemeoc_snapshot_is_persisted_and_survives_schema_reopen(tmp_path):
     assert next(record for record in records if record["source_record_id"] == "batch-a")["official_url"] == (
         "https://insta360.com/jobs"
     )
+
+
+def test_complete_givemeoc_snapshot_replaces_stale_records(tmp_path):
+    repository = JobRepository(tmp_path / "jobs.sqlite")
+    repository.init_schema()
+    repository.save_givemeoc_records(
+        [{"source_record_id": "stale", "company": "OldCo"}],
+        complete=True,
+        total_pages=40,
+        pages_scanned=40,
+    )
+    repository.save_givemeoc_records(
+        [{
+            "source_record_id": "unmatched",
+            "company": "NewCo",
+            "company_normalized": "newco",
+            "official_url": "https://newco.example/jobs",
+        }],
+        complete=True,
+        total_pages=40,
+        pages_scanned=40,
+    )
+
+    assert [row["source_record_id"] for row in repository.list_givemeoc_records()] == ["unmatched"]
+
+
+def test_givemeoc_seed_builder_keeps_unmatched_crawler_records(tmp_path):
+    repository = JobRepository(tmp_path / "jobs.sqlite")
+    repository.init_schema()
+    repository.save_givemeoc_records(
+        [{
+            "source_record_id": "unmatched",
+            "company": "NewCo",
+            "company_normalized": "newco",
+            "announcement_url": "https://news.example/newco",
+            "official_url": "https://newco.example/jobs",
+        }],
+        complete=True,
+        total_pages=40,
+        pages_scanned=40,
+    )
+
+    output = tmp_path / "givemeoc_seed.sqlite"
+    assert build_givemeoc_seed(repository.db_path, output) == 1
+    with sqlite3.connect(output) as connection:
+        row = connection.execute(
+            "SELECT company, announcement_url, official_url FROM givemeoc_records"
+        ).fetchone()
+    assert row == ("NewCo", "https://news.example/newco", "https://newco.example/jobs")
 
 
 def test_unmatched_job_links_are_cleared_only_on_complete_snapshot():

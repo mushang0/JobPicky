@@ -260,7 +260,8 @@ class GiveMeOCCrawler:
         except Exception as exc:
             return GiveMeOCCrawlResult(
                 tuple(records.values()), pages_scanned, False,
-                safe_exception_detail(exc, self.config), total_pages,
+                f"page={page}: {safe_exception_detail(exc, self.config)}",
+                total_pages,
             )
 
     def _page_limit(self, mode: str, discovered: int) -> int:

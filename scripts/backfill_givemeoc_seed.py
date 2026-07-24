@@ -7,7 +7,8 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from dataclasses import asdict, replace
+from contextlib import closing
+from dataclasses import asdict
 from pathlib import Path
 
 
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from jobpicky.config import load_config
-from jobpicky.givemeoc import GiveMeOCCrawler, apply_givemeoc_links
+from jobpicky.givemeoc import GiveMeOCRecord, GiveMeOCCrawler, apply_givemeoc_links
 from jobpicky.storage import JobRepository
 
 from build_seed import build_seed
@@ -23,25 +24,33 @@ from build_givemeoc_seed import build_givemeoc_seed
 from export_seed_source import export_seed_source
 
 
-def _stats(database: Path) -> tuple[int, int, int, int, int, int]:
-    with sqlite3.connect(database) as conn:
-        return conn.execute(
-            """
-            SELECT
-                COUNT(*),
-                SUM(CASE WHEN official_url_source = 'givemeoc' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN announcement_url_source = 'givemeoc' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN official_url_source = 'givemeoc'
-                          OR announcement_url_source = 'givemeoc' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN official_url IS NOT NULL AND official_url <> '' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN announcement_url IS NOT NULL AND announcement_url <> '' THEN 1 ELSE 0 END)
-            FROM jobs
-            """
-        ).fetchone()
+def _load_seed_cache(seed: Path) -> tuple[tuple[GiveMeOCRecord, ...], bool]:
+    if not seed.is_file():
+        return (), False
+    with closing(sqlite3.connect(seed)) as connection:
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT source_record_id, company, company_normalized,
+                       recruitment_type, target_graduate_year, city, deadline,
+                       updated_at, announcement_url, official_url
+                FROM givemeoc_records
+                ORDER BY source_record_id
+                """
+            ).fetchall()
+            state = connection.execute(
+                "SELECT cache_initialized FROM givemeoc_scan_state WHERE id = 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return (), False
+    return tuple(GiveMeOCRecord(**dict(row)) for row in rows), bool(state and state[0])
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backfill the seed database from GiveMeOC")
+    parser = argparse.ArgumentParser(
+        description="Build or incrementally update the GiveMeOC seed without modifying the job seed"
+    )
     parser.add_argument(
         "--database",
         type=Path,
@@ -52,12 +61,23 @@ def main() -> int:
         type=Path,
         default=ROOT / "src" / "jobpicky" / "resources" / "jobs_seed_source.json",
     )
-    parser.add_argument("--max-pages", type=int, default=0, help="0 means all discovered pages")
+    parser.add_argument("--mode", choices=("init", "daily"), default="init")
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=40,
+        help="init mode page limit; 0 means all discovered pages",
+    )
     parser.add_argument("--interval", type=float, default=0.2)
     parser.add_argument(
         "--givemeoc-seed",
         type=Path,
         default=ROOT / "src" / "jobpicky" / "resources" / "givemeoc_seed.sqlite",
+    )
+    parser.add_argument(
+        "--sync-job-seed",
+        action="store_true",
+        help="also update jobs_seed.sqlite and jobs_seed_source.json with matched links",
     )
     args = parser.parse_args()
 
@@ -65,29 +85,39 @@ def main() -> int:
     source = args.source.resolve()
     with tempfile.TemporaryDirectory(prefix="jobpicky-givemeoc-") as temporary:
         temporary_path = Path(temporary)
-        database_backup = temporary_path / database.name
-        source_backup = temporary_path / source.name
+        working_database = temporary_path / database.name
         givemeoc_seed = args.givemeoc_seed.resolve()
         givemeoc_seed_backup = temporary_path / givemeoc_seed.name
+        database_backup = temporary_path / f"{database.name}.bak"
+        source_backup = temporary_path / f"{source.name}.bak"
         if givemeoc_seed.is_file():
             shutil.copy2(givemeoc_seed, givemeoc_seed_backup)
-        shutil.copy2(database, database_backup)
-        shutil.copy2(source, source_backup)
+        if args.sync_job_seed:
+            shutil.copy2(database, database_backup)
+            if source.is_file():
+                shutil.copy2(source, source_backup)
         try:
             config = load_config("__jobpicky_missing_config__.yaml")
             config.setdefault("givemeoc", {}).update(
                 enabled=True,
                 max_pages_init=max(0, args.max_pages),
+                max_pages_daily=0,
                 min_interval_seconds=max(0.0, args.interval),
             )
 
-            repo = JobRepository(database)
+            shutil.copy2(database, working_database)
+            repo = JobRepository(working_database)
             repo.init_schema()
-            # list_all_jobs() is a public projection and intentionally omits
-            # the internal dedupe key; seed reconciliation needs the raw row.
+            # Read jobs from the temporary copy; the packaged job seed stays read-only.
             with repo.connect() as connection:
                 rows = [dict(row) for row in connection.execute("SELECT * FROM jobs")]
             jobs = [repo.job_from_row(row) for row in rows]
+            if args.mode == "daily":
+                cached_records, cache_initialized = _load_seed_cache(givemeoc_seed)
+                if not cache_initialized:
+                    raise RuntimeError("GiveMeOC seed is not initialized; run with --mode init first")
+            else:
+                cached_records, cache_initialized = (), False
             progress_events = 0
 
             def progress(_message: str) -> None:
@@ -96,63 +126,54 @@ def main() -> int:
                 if progress_events % 25 == 0:
                     print(f"progress_events={progress_events}", flush=True)
 
-            result = GiveMeOCCrawler(config, progress=progress).crawl(jobs, mode="init")
-            matched = apply_givemeoc_links(
-                jobs,
-                result,
-                config.get("system_taxonomy", {}).get("company_aliases", {}),
-            )
+            crawler = GiveMeOCCrawler(config, progress=progress)
+            crawler.set_cache(cached_records, initialized=cache_initialized)
+            result = crawler.crawl(jobs, mode=args.mode)
+            print(f"crawl_mode={args.mode}", flush=True)
             print(f"crawl_pages={result.pages_scanned}", flush=True)
             print(f"crawl_complete={int(result.complete)}", flush=True)
             print(f"crawl_records={len(result.records)}", flush=True)
-            print(f"matched_jobs={matched}", flush=True)
             if result.error:
+                print(f"crawl_error={result.error}", file=sys.stderr, flush=True)
                 raise RuntimeError("GivemeOC crawl failed; seed update rolled back")
 
-            # The configured page limit is an intentional seed snapshot boundary.
-            # Treat it as complete for reconciliation so legacy unverified links
-            # outside the selected recent pages are removed from the seed.
-            snapshot = replace(result, complete=True)
-            apply_givemeoc_links(
-                jobs,
-                snapshot,
-                config.get("system_taxonomy", {}).get("company_aliases", {}),
-            )
-            repo.reconcile_givemeoc_links(jobs, complete=True)
+            if args.sync_job_seed:
+                matched = apply_givemeoc_links(
+                    jobs,
+                    result,
+                    config.get("system_taxonomy", {}).get("company_aliases", {}),
+                )
+                repo.reconcile_givemeoc_links(jobs, complete=True)
+                print(f"matched_jobs={matched}", flush=True)
+
             repo.save_givemeoc_records(
                 (asdict(record) for record in result.records),
                 complete=True,
                 total_pages=result.total_pages,
                 pages_scanned=result.pages_scanned,
             )
-            staged_source = temporary_path / source.name
-            staged_database = temporary_path / database.name
             staged_givemeoc_seed = temporary_path / givemeoc_seed.name
-            export_seed_source(database, staged_source)
-            build_seed(staged_source, staged_database)
-            build_givemeoc_seed(database, staged_givemeoc_seed)
-            shutil.copy2(staged_source, source)
-            shutil.copy2(staged_database, database)
+            build_givemeoc_seed(working_database, staged_givemeoc_seed)
             shutil.copy2(staged_givemeoc_seed, givemeoc_seed)
-
-            values = _stats(database)
-            labels = (
-                "seed_total",
-                "seed_givemeoc_official",
-                "seed_givemeoc_announcement",
-                "seed_givemeoc_any",
-                "seed_any_official_value",
-                "seed_any_announcement_value",
-            )
-            for label, value in zip(labels, values):
-                print(f"{label}={value}")
-            print("snapshot_committed=1")
+            if args.sync_job_seed:
+                staged_source = temporary_path / source.name
+                staged_database = temporary_path / database.name
+                export_seed_source(working_database, staged_source)
+                build_seed(staged_source, staged_database)
+                shutil.copy2(staged_source, source)
+                shutil.copy2(staged_database, database)
+                print("job_seed_synced=1", flush=True)
+            print(f"seed_records={len(result.records)}", flush=True)
+            print("givemeoc_seed_committed=1")
             return 0
         except BaseException:
-            shutil.copy2(database_backup, database)
-            shutil.copy2(source_backup, source)
             if givemeoc_seed_backup.is_file():
                 shutil.copy2(givemeoc_seed_backup, givemeoc_seed)
+            if args.sync_job_seed:
+                if database_backup.is_file():
+                    shutil.copy2(database_backup, database)
+                if source_backup.is_file():
+                    shutil.copy2(source_backup, source)
             raise
 
 

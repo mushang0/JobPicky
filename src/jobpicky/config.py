@@ -31,8 +31,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "givemeoc": {
         "enabled": True,
-        # 0 follows the newest pages until a complete cached page is reached.
-        "max_pages_init": 0,
+        # Initial seed snapshots cover the first 40 pages; daily scans use 0
+        # and stop when they reach a page already fully present in the cache.
+        "max_pages_init": 40,
         "max_pages_daily": 0,
         "stop_when_page_cached": True,
         "min_interval_seconds": 0.2,

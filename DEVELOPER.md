@@ -214,6 +214,54 @@ python scripts/release_check.py
 提交前确认没有凭据、运行数据、临时目录或无关格式化变更。GitHub Actions 的普通测试和发布验收应复用上述入口；不要重新在 workflow 中堆叠独立的 wheel 构建、venv 安装、`pip check` 或 smoke 命令。
 ## GitHub Release
 
+## 种子库与链接同步流程
+
+项目中的三个数据库职责不同：
+
+- `src/jobpicky/resources/jobs_seed.sqlite`：WonderCV 岗位发布基线。
+- `src/jobpicky/resources/givemeoc_seed.sqlite`：GiveMeOC 公司、公告和官方投递链接缓存。
+- 用户运行库 `jobs.sqlite`：用户当前岗位、匹配结果、投递状态和同步状态。
+
+用户初始化时，先将两个发布种子库加载到运行库。日常运行由 `services/scanning.py` 扫描 WonderCV 新岗位，再使用 GiveMeOC 缓存增量扫描；匹配到的链接写入运行库，前端只读取运行库展示结果。运行库不应反向覆盖发布种子库。
+
+### 发布种子库更新顺序
+
+1. 先更新 GiveMeOC 链接种子。
+2. 再用 `refresh_seed.py` 刷新 WonderCV 岗位种子。
+3. 在 staged 岗位种子中加载 GiveMeOC 种子并匹配公司。
+4. 将匹配到的链接写入 staged 岗位种子。
+5. 验证通过后使用 `--publish` 原子发布岗位 JSON 和 SQLite；GiveMeOC 种子单独发布。
+
+岗位种子刷新禁止调用 `OfficialUrlFinder` 或其他搜索引擎补全官方链接。官方链接唯一来源是 GiveMeOC；GiveMeOC 没有对应链接时，岗位的官方链接保持为空，不在前端展示。
+
+初次建立 GiveMeOC 种子，扫描前 40 页：
+
+```powershell
+python scripts/backfill_givemeoc_seed.py --mode init --max-pages 40
+```
+
+后续只扫描新增 GiveMeOC 记录，遇到整页记录都已存在于链接种子时停止：
+
+```powershell
+python scripts/backfill_givemeoc_seed.py --mode daily
+```
+
+刷新岗位种子并同步最新链接：
+
+```powershell
+python scripts/refresh_seed.py --publish
+```
+
+`refresh_seed.py` 默认读取 `src/jobpicky/resources/givemeoc_seed.sqlite`。如使用其他文件，传入 `--givemeoc-seed PATH`。它只在 staged 文件中处理链接，只有 `--publish` 才会覆盖发布版岗位种子。
+
+如果只需要给现有岗位种子补充链接、不刷新 WonderCV 岗位，可以使用：
+
+```powershell
+python scripts/backfill_givemeoc_seed.py --mode daily --sync-job-seed
+```
+
+`--sync-job-seed` 是显式写入岗位种子的操作；普通 GiveMeOC 更新默认只修改 `givemeoc_seed.sqlite`。
+
 1. `git fetch origin`，将功能分支合入 `main`。
 2. 运行 `python -m pytest -q` 和 `python scripts/release_check.py`。
 3. 依次推送 `main`、带注释的版本 tag：

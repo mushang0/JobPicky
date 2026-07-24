@@ -1048,6 +1048,8 @@ class JobRepository:
     ) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         with self.connect() as conn:
+            if complete:
+                conn.execute("DELETE FROM givemeoc_records")
             for record in records:
                 source_record_id = str(record.get("source_record_id") or "").strip()
                 company = str(record.get("company") or "").strip()

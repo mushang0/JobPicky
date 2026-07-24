@@ -6,6 +6,7 @@ import argparse
 import os
 import sqlite3
 import tempfile
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -16,45 +17,88 @@ DEFAULT_OUTPUT = ROOT / "src" / "jobpicky" / "resources" / "givemeoc_seed.sqlite
 
 
 def build_givemeoc_seed(source: Path, output: Path) -> int:
-    with sqlite3.connect(source) as connection:
+    with closing(sqlite3.connect(source)) as connection:
         connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """
-            SELECT givemeoc_record_id, company, company_normalized, batch,
-                   target_graduate_year, city, deadline, last_seen,
-                   announcement_url, announcement_url_source,
-                   official_url, official_url_source
-            FROM jobs
-            WHERE givemeoc_record_id IS NOT NULL AND givemeoc_record_id <> ''
-            ORDER BY id
-            """
-        ).fetchall()
+        has_snapshot = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'givemeoc_records'"
+        ).fetchone()
+        if has_snapshot:
+            rows = connection.execute(
+                """
+                SELECT source_record_id, company, company_normalized,
+                       recruitment_type, target_graduate_year, city, deadline,
+                       updated_at, announcement_url, official_url,
+                       last_seen_at, last_seen_page
+                FROM givemeoc_records
+                ORDER BY source_record_id
+                """
+            ).fetchall()
+            scan_state = connection.execute(
+                """
+                SELECT cache_initialized, total_pages, pages_scanned,
+                       last_full_scan_at, last_incremental_scan_at, updated_at
+                FROM givemeoc_scan_state
+                WHERE id = 1
+                """
+            ).fetchone()
+        else:
+            # Keep the standalone builder compatible with older job seed files.
+            rows = connection.execute(
+                """
+                SELECT givemeoc_record_id AS source_record_id, company,
+                       company_normalized, batch AS recruitment_type,
+                       target_graduate_year, city, deadline,
+                       last_seen AS updated_at, announcement_url,
+                       announcement_url_source, official_url,
+                       official_url_source
+                FROM jobs
+                WHERE givemeoc_record_id IS NOT NULL AND givemeoc_record_id <> ''
+                ORDER BY id
+                """
+            ).fetchall()
+            scan_state = None
 
     records: dict[str, dict] = {}
     now = datetime.now().isoformat(timespec="seconds")
     for row in rows:
-        record_id = str(row["givemeoc_record_id"])
+        record_id = str(row["source_record_id"])
         record = records.setdefault(
             record_id,
             {
                 "source_record_id": record_id,
                 "company": row["company"] or "",
                 "company_normalized": row["company_normalized"] or "",
-                "recruitment_type": row["batch"] or "",
+                "recruitment_type": row["recruitment_type"] or "",
                 "target_graduate_year": row["target_graduate_year"] or "",
                 "city": row["city"] or "",
                 "deadline": row["deadline"] or "",
-                "updated_at": row["last_seen"] or "",
-                "announcement_url": None,
-                "official_url": None,
-                "last_seen_at": now,
-                "last_seen_page": 0,
+                "updated_at": row["updated_at"] or "",
+                "announcement_url": row["announcement_url"],
+                "official_url": row["official_url"],
+                "last_seen_at": row["last_seen_at"] if "last_seen_at" in row.keys() else now,
+                "last_seen_page": row["last_seen_page"] if "last_seen_page" in row.keys() else 0,
             },
         )
-        if row["announcement_url_source"] == "givemeoc" and row["announcement_url"]:
-            record["announcement_url"] = row["announcement_url"]
-        if row["official_url_source"] == "givemeoc" and row["official_url"]:
-            record["official_url"] = row["official_url"]
+        if "announcement_url_source" in row.keys():
+            if row["announcement_url_source"] != "givemeoc":
+                record["announcement_url"] = None
+            if row["official_url_source"] != "givemeoc":
+                record["official_url"] = None
+
+    if scan_state:
+        (
+            cache_initialized,
+            total_pages,
+            pages_scanned,
+            last_full_scan_at,
+            last_incremental_scan_at,
+            updated_at,
+        ) = scan_state
+    else:
+        cache_initialized = int(bool(records))
+        total_pages = pages_scanned = 0
+        last_full_scan_at = last_incremental_scan_at = None
+        updated_at = now
 
     output.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
@@ -110,9 +154,17 @@ def build_givemeoc_seed(source: Path, output: Path) -> int:
                 INSERT INTO givemeoc_scan_state (
                     id, cache_initialized, total_pages, pages_scanned,
                     last_full_scan_at, last_incremental_scan_at, updated_at
-                ) VALUES (1, ?, 0, 0, ?, NULL, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (int(bool(records)), now if records else None, now),
+                (
+                    1,
+                    cache_initialized,
+                    total_pages,
+                    pages_scanned,
+                    last_full_scan_at,
+                    last_incremental_scan_at,
+                    updated_at,
+                ),
             )
         connection.close()
         os.replace(temporary, output)
