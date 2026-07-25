@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from jobpicky.models import Job
+from jobpicky.official_jobs import OfficialCrawlResult
 from jobpicky.storage import JobRepository
 from jobpicky.wondercv import CrawlResult, EXTRACTION_VERSION
 from scripts import refresh_seed as refresh_seed_module
@@ -143,6 +144,89 @@ def test_refresh_publishes_both_artifacts_after_validation(tmp_path: Path):
     backup = Path(result["run_directory"]) / "backup"
     assert (backup / target_json.name).read_text(encoding="utf-8") == "old json"
     assert (backup / target_database.name).read_bytes() == b"old database"
+
+
+def test_refresh_keeps_link_checkpoint_when_official_stage_fails(tmp_path: Path):
+    source = tmp_path / "source.sqlite"
+    target_json = tmp_path / "official.json"
+    target_database = tmp_path / "official.sqlite"
+    givemeoc_seed = tmp_path / "givemeoc_seed.sqlite"
+    _seed(source)
+    target_json.write_text("old json", encoding="utf-8")
+    target_database.write_bytes(b"old database")
+    link_repository = JobRepository(givemeoc_seed)
+    link_repository.init_schema()
+    link_repository.save_givemeoc_records(
+        [{
+            "source_record_id": "givemeoc-new",
+            "company": "new company",
+            "company_normalized": "newcompany",
+            "official_url": "https://jobs.lever.co/newco",
+        }],
+        complete=True,
+        total_pages=1,
+        pages_scanned=1,
+    )
+
+    class FailingOfficialCrawler:
+        def __init__(self, config):
+            pass
+
+        def crawl(self, records):
+            raise RuntimeError("official source unavailable")
+
+    messages = []
+    with pytest.raises(RuntimeError, match="official source unavailable"):
+        refresh_seed(
+            source,
+            target_json,
+            target_database,
+            tmp_path / "runs",
+            through_date=date(2026, 7, 17),
+            givemeoc_seed=givemeoc_seed,
+            crawler_factory=FakeCrawler,
+            official_crawler_factory=FailingOfficialCrawler,
+            max_new_items=10,
+            publish=True,
+            progress=messages.append,
+        )
+
+    with JobRepository(target_database).connect() as connection:
+        row = connection.execute(
+            "SELECT official_url, official_url_source, givemeoc_record_id FROM jobs WHERE dedupe_key = 'new'"
+        ).fetchone()
+    assert tuple(row) == ("https://jobs.lever.co/newco", "givemeoc", "givemeoc-new")
+    assert any(message.startswith("[scan]") for message in messages)
+    assert any(message.startswith("[givemeoc-links]") for message in messages)
+
+    class UnexpectedWonderCrawler:
+        def __init__(self, config):
+            raise AssertionError("resume should not create the WonderCV crawler")
+
+    class SuccessfulOfficialCrawler:
+        def __init__(self, config):
+            pass
+
+        def crawl(self, records):
+            return OfficialCrawlResult((), len(tuple(records)), 0)
+
+    resumed_messages = []
+    resumed = refresh_seed(
+        source,
+        target_json,
+        target_database,
+        tmp_path / "runs",
+        through_date=date(2026, 7, 17),
+        givemeoc_seed=givemeoc_seed,
+        crawler_factory=UnexpectedWonderCrawler,
+        official_crawler_factory=SuccessfulOfficialCrawler,
+        max_new_items=10,
+        publish=True,
+        resume=True,
+        progress=resumed_messages.append,
+    )
+    assert resumed["published"] is True
+    assert any(message.startswith("[恢复]") for message in resumed_messages)
 
 
 def test_refresh_rejects_invalid_dates_without_publishing(tmp_path: Path):

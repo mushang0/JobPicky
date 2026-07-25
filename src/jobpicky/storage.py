@@ -430,6 +430,7 @@ class JobRepository:
         update_assignments = [f"{column}=excluded.{column}" for column in update_columns]
         update_assignments.append(
             "official_url=CASE "
+            "WHEN excluded.official_url_source = 'official' AND excluded.official_url IS NOT NULL THEN excluded.official_url "
             "WHEN jobs.official_url IS NULL OR jobs.official_url = '' THEN excluded.official_url "
             "ELSE jobs.official_url END"
         )
@@ -889,7 +890,7 @@ class JobRepository:
                 COALESCE(jobs.detail_url, jobs.source_url) AS legacy_detail_url,
                 jobs.apply_url,
                 jobs.official_url,
-                CASE WHEN jobs.official_url_source = 'givemeoc' THEN jobs.official_url END AS verified_official_url,
+                CASE WHEN jobs.official_url_source IN ('givemeoc', 'official') THEN jobs.official_url END AS verified_official_url,
                 CASE WHEN jobs.announcement_url_source = 'givemeoc' THEN jobs.announcement_url END AS verified_announcement_url,
                 jobs.announcement_url,
                 jobs.official_url_source,
@@ -937,7 +938,7 @@ class JobRepository:
                 COALESCE(jobs.detail_url, jobs.source_url) AS legacy_detail_url,
                 jobs.apply_url,
                 jobs.official_url,
-                CASE WHEN jobs.official_url_source = 'givemeoc' THEN jobs.official_url END AS verified_official_url,
+                CASE WHEN jobs.official_url_source IN ('givemeoc', 'official') THEN jobs.official_url END AS verified_official_url,
                 CASE WHEN jobs.announcement_url_source = 'givemeoc' THEN jobs.announcement_url END AS verified_announcement_url,
                 jobs.announcement_url,
                 jobs.official_url_source,
@@ -1121,7 +1122,7 @@ class JobRepository:
                 if not job.dedupe_key:
                     continue
                 row = conn.execute(
-                    "SELECT id, official_url, official_url_source, announcement_url, announcement_url_source, givemeoc_record_id "
+                    "SELECT id, source, official_url, official_url_source, announcement_url, announcement_url_source, givemeoc_record_id "
                     "FROM jobs WHERE dedupe_key = ?",
                     (job.dedupe_key,),
                 ).fetchone()
@@ -1132,7 +1133,9 @@ class JobRepository:
                         """
                         UPDATE jobs
                         SET announcement_url = ?, announcement_url_source = ?,
-                            official_url = ?, official_url_source = ?, givemeoc_record_id = ?
+                            official_url = CASE WHEN source = 'official' AND official_url_source = 'official' AND official_url IS NOT NULL THEN official_url ELSE ? END,
+                            official_url_source = CASE WHEN source = 'official' AND official_url_source = 'official' AND official_url IS NOT NULL THEN official_url_source ELSE ? END,
+                            givemeoc_record_id = ?
                         WHERE id = ?
                         """,
                         (
@@ -1144,13 +1147,18 @@ class JobRepository:
                             int(row["id"]),
                         ),
                     )
+                    preserved_official = (
+                        row["source"] == "official"
+                        and row["official_url_source"] == "official"
+                        and row["official_url"]
+                    )
                     if any(
                         row[field] != value
                         for field, value in (
                             ("announcement_url", job.announcement_url),
                             ("announcement_url_source", job.announcement_url_source),
-                            ("official_url", job.official_url),
-                            ("official_url_source", job.official_url_source),
+                            ("official_url", row["official_url"] if preserved_official else job.official_url),
+                            ("official_url_source", row["official_url_source"] if preserved_official else job.official_url_source),
                             ("givemeoc_record_id", job.givemeoc_record_id),
                         )
                     ):

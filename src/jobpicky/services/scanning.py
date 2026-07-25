@@ -12,8 +12,16 @@ from ..alerts import build_daily_message
 from ..error_safety import known_secrets, redact_text, safe_exception_detail
 from ..feishu import FeishuBitableClient, FeishuBot, FeishuConfig
 from ..official_search import OfficialUrlFinder
-from ..givemeoc import GiveMeOCCrawler, GiveMeOCRecord, apply_givemeoc_links
-from ..core import DailyUpdateService, JobIngestionService, MatchingService, RecommendationService
+from ..givemeoc import (
+    GiveMeOCCrawlResult,
+    GiveMeOCCrawler,
+    GiveMeOCRecord,
+    apply_givemeoc_links,
+    build_givemeoc_record_index,
+    givemeoc_company_key,
+)
+from ..official_jobs import OfficialJobCrawler
+from ..core import DailyUpdateService, JobIngestionService, MatchingService, RecommendationService, build_official_job_batch
 from ..pipeline import enrich_official_urls, pull_user_states_from_feishu
 from ..run_guard import DailyRunGuard, DailyRunInProgress
 from ..runtime import RunReport, RunReporter
@@ -187,6 +195,8 @@ def run_daily_workflow(
     crawl = None
     summary = None
     enrich_summary = None
+    official_result = None
+    jobs_for_ingest = None
     sync_summary = SyncSummary()
     try:
         with DailyRunGuard(db_path) as guard:
@@ -273,30 +283,122 @@ def run_daily_workflow(
                         )
                         for row in repo.list_givemeoc_records()
                     )
-                    if hasattr(givemeoc, "set_cache"):
-                        givemeoc.set_cache(cached_records, repo.givemeoc_cache_initialized())
-                    link_result = givemeoc.crawl(crawl.jobs, mode="daily")
-                    repo.save_givemeoc_records(
-                        (asdict(record) for record in link_result.records),
-                        complete=link_result.complete,
-                        total_pages=getattr(link_result, "total_pages", 0),
-                        pages_scanned=link_result.pages_scanned,
+                    cached_records_by_id = {
+                        record.source_record_id: record for record in cached_records
+                    }
+                    if config.get("givemeoc", {}).get("cache_only", False):
+                        link_result = GiveMeOCCrawlResult(
+                            records=cached_records,
+                            pages_scanned=0,
+                            complete=repo.givemeoc_cache_initialized(),
+                            total_pages=0,
+                        )
+                    else:
+                        if hasattr(givemeoc, "set_cache"):
+                            givemeoc.set_cache(cached_records, repo.givemeoc_cache_initialized())
+                        link_result = givemeoc.crawl(crawl.jobs, mode="daily")
+                        repo.save_givemeoc_records(
+                            (asdict(record) for record in link_result.records),
+                            complete=link_result.complete,
+                            total_pages=getattr(link_result, "total_pages", 0),
+                            pages_scanned=link_result.pages_scanned,
+                        )
+                    # Match only affected companies for an incomplete incremental
+                    # crawl; a complete snapshot still reconciles every stored job.
+                    aliases = config.get("system_taxonomy", {}).get("company_aliases", {})
+                    record_index = build_givemeoc_record_index(link_result.records, aliases)
+                    changed_company_keys = {
+                        givemeoc_company_key(job.company, aliases)
+                        for job in crawl.jobs
+                        if job.company
+                    }
+                    changed_company_keys.update(
+                        givemeoc_company_key(record.company, aliases)
+                        for record in link_result.records
+                        if cached_records_by_id.get(record.source_record_id) != record
                     )
-                    # The crawl is incremental, but the link match is deliberately
-                    # against every stored WonderCV job and the complete cache.
                     jobs_by_key = {
                         job.dedupe_key: job
                         for job in (repo.job_from_row(row) for row in repo.list_stored_jobs())
                         if job.dedupe_key
                     }
                     jobs_by_key.update({job.dedupe_key: job for job in crawl.jobs if job.dedupe_key})
-                    link_jobs = list(jobs_by_key.values()) + [job for job in crawl.jobs if not job.dedupe_key]
+                    link_jobs = (
+                        list(jobs_by_key.values())
+                        if link_result.complete
+                        else [
+                            job for job in jobs_by_key.values()
+                            if givemeoc_company_key(job.company, aliases) in changed_company_keys
+                        ]
+                    ) + [job for job in crawl.jobs if not job.dedupe_key]
                     matched_links = apply_givemeoc_links(
                         link_jobs,
                         link_result,
-                        config.get("system_taxonomy", {}).get("company_aliases", {}),
+                        aliases,
+                        record_index,
                     )
                     repo.reconcile_givemeoc_links(link_jobs, complete=link_result.complete)
+                    if False and config.get("official_jobs", {}).get("enabled", False):
+                        official_result = OfficialJobCrawler(
+                            config,
+                            cancel_check=is_cancelled,
+                            progress=lambda detail: reporter.stage(
+                                "daily", 2, 6, "鎶撳彇瀹樻柟宀椾綅", detail=detail,
+                            ),
+                        ).crawl(
+                            record
+                            for record in link_result.records
+                            if record.official_url
+                            and (
+                                identify_official_platform(record.official_url) != "generic"
+                                or config.get("official_jobs", {}).get("allow_generic", False)
+                            )
+                        )
+                        if official_result.jobs:
+                            stored_jobs = [
+                                repo.job_from_row(row)
+                                for row in repo.list_stored_jobs()
+                            ]
+                            batch = build_official_job_batch(
+                                crawl.jobs,
+                                link_result.records,
+                                config,
+                                existing_jobs=(repo.job_from_row(row) for row in repo.list_stored_jobs()),
+                                crawler=OfficialJobCrawler(
+                                    config,
+                                    cancel_check=is_cancelled,
+                                    progress=lambda detail: reporter.stage(
+                                        "daily", 2, 6, "鎶撳彇瀹樻柟宀椾綅", detail=detail,
+                                    ),
+                                ),
+                                links_complete=link_result.complete,
+                                record_index=record_index,
+                            )
+                            official_result = batch.official_result
+                            jobs_for_ingest = list(batch.jobs)
+                        if official_result.errors:
+                            errors.append(_stage_error("official_jobs", "official_jobs_partial", "瀹樻柟宀椾綅琛ュ厖閮ㄥ垎澶辫触"))
+                    if config.get("official_jobs", {}).get("enabled", False):
+                        batch = build_official_job_batch(
+                            crawl.jobs,
+                            link_result.records,
+                            config,
+                            existing_jobs=(repo.job_from_row(row) for row in repo.list_stored_jobs()),
+                            crawler=OfficialJobCrawler(
+                                config,
+                                cancel_check=is_cancelled,
+                                progress=lambda detail: reporter.stage(
+                                    "daily", 2, 6, "鎶撳彇瀹樻柟宀椾綅", detail=detail,
+                                ),
+                            ),
+                            links_complete=link_result.complete,
+                            record_index=record_index,
+                        )
+                        official_result = batch.official_result
+                        jobs_for_ingest = list(batch.jobs)
+                        if official_result.errors:
+                            errors.append(_stage_error("official_jobs", "official_jobs_partial", "瀹樻柟宀椾綅琛ュ厖閮ㄥ垎澶辫触"))
+
                     enrich_summary = SimpleNamespace(
                         items_seen=len({job.company_normalized or job.company for job in crawl.jobs}),
                         updated_items=matched_links,
@@ -310,7 +412,7 @@ def run_daily_workflow(
 
             reporter.stage("daily", 3, 6, "标准化、增量写入并匹配岗位")
             try:
-                summary = run_daily_with_jobs(repo, crawl.jobs, config)
+                summary = run_daily_with_jobs(repo, jobs_for_ingest or crawl.jobs, config)
             except Exception as exc:
                 logging.error("Daily processing failed: %s", safe_exception_detail(exc, config))
                 errors.append(_stage_error("process", "processing_failed", "岗位处理失败"))

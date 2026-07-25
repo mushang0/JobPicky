@@ -14,6 +14,7 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.12",
+    "cryptography>=42",
     "fastapi>=0.115,<0.116",
     "openpyxl>=3.1",
     "PyYAML>=6.0",

@@ -76,6 +76,11 @@ def _company_key(value: str | None, aliases: dict[str, list[str]] | None) -> str
     return key
 
 
+def givemeoc_company_key(value: str | None, aliases: dict[str, list[str]] | None = None) -> str:
+    """Return the shared company key used by GiveMeOC link matching."""
+    return _company_key(value, aliases)
+
+
 def _external_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -275,9 +280,14 @@ def match_givemeoc_record(
     job: Job,
     records: tuple[GiveMeOCRecord, ...],
     aliases: dict[str, list[str]] | None = None,
+    record_index: dict[str, tuple[GiveMeOCRecord, ...]] | None = None,
 ) -> GiveMeOCRecord | None:
     key = _company_key(job.company, aliases)
-    candidates = [record for record in records if _company_key(record.company, aliases) == key]
+    candidates = (
+        list(record_index.get(key, ()))
+        if record_index is not None
+        else [record for record in records if _company_key(record.company, aliases) == key]
+    )
     if not candidates:
         return None
 
@@ -294,14 +304,25 @@ def match_givemeoc_record(
     return max(candidates, key=score)
 
 
+def build_givemeoc_record_index(
+    records: tuple[GiveMeOCRecord, ...],
+    aliases: dict[str, list[str]] | None = None,
+) -> dict[str, tuple[GiveMeOCRecord, ...]]:
+    index: dict[str, list[GiveMeOCRecord]] = {}
+    for record in records:
+        index.setdefault(_company_key(record.company, aliases), []).append(record)
+    return {key: tuple(value) for key, value in index.items()}
+
+
 def apply_givemeoc_links(
     jobs: list[Job],
     result: GiveMeOCCrawlResult,
     aliases: dict[str, list[str]] | None = None,
+    record_index: dict[str, tuple[GiveMeOCRecord, ...]] | None = None,
 ) -> int:
     matched = 0
     for job in jobs:
-        record = match_givemeoc_record(job, result.records, aliases)
+        record = match_givemeoc_record(job, result.records, aliases, record_index)
         if record:
             matched += 1
             job.announcement_url = record.announcement_url

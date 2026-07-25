@@ -198,7 +198,7 @@ class WebStateService:
         for item in items:
             item["card_summary"] = extract_wondercv_card_summary(item.pop("raw_title", "")) or item.get("summary")
             item["announcement_url"] = item.pop("verified_announcement_url", None)
-            item["official_url"] = item.pop("verified_official_url", None)
+            item["official_url"] = item.pop("verified_official_url", None) or item.get("official_url")
             item["detail_url"] = item.pop("legacy_detail_url", None)
             item["apply_url"] = None
         _, today_recommended_total = repo.search_jobs(
@@ -228,7 +228,7 @@ class WebStateService:
         if item:
             item["card_summary"] = extract_wondercv_card_summary(item.pop("raw_title", "")) or item.get("summary")
             item["announcement_url"] = item.pop("verified_announcement_url", None)
-            item["official_url"] = item.pop("verified_official_url", None)
+            item["official_url"] = item.pop("verified_official_url", None) or item.get("official_url")
             item["detail_url"] = item.pop("legacy_detail_url", None)
             item["apply_url"] = None
         return item

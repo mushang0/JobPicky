@@ -32,7 +32,7 @@ def build_update_fields(row: dict[str, Any]) -> dict[str, Any]:
     _set_text(fields, "批次", row.get("batch"))
 
     source = row.get("official_url_source")
-    apply_url = row.get("official_url") if source in (None, "givemeoc") else None
+    apply_url = row.get("official_url") if source in (None, "givemeoc", "official") else None
     if apply_url:
         fields["投递入口"] = {"link": str(apply_url), "text": "打开投递入口"}
     _set_date(fields, "截止时间", row.get("deadline"))

@@ -11,6 +11,7 @@ from .ingestion import IngestedJob, IngestionSummary, JobIngestionService
 from .matching import MatchingService, MatchingSummary
 from .queries import JobQueryService
 from .recommendations import RecommendationService
+from .official_pipeline import OfficialJobBatch, build_official_job_batch
 
 __all__ = [
     "DatabaseBootstrapService",
@@ -26,4 +27,6 @@ __all__ = [
     "MatchingSummary",
     "JobQueryService",
     "RecommendationService",
+    "OfficialJobBatch",
+    "build_official_job_batch",
 ]

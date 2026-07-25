@@ -36,7 +36,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_pages_init": 40,
         "max_pages_daily": 0,
         "stop_when_page_cached": True,
+        "cache_only": False,
         "min_interval_seconds": 0.2,
+    },
+    "official_jobs": {
+        "enabled": True,
+        "allow_generic": False,
+        "max_details_per_source": 50,
+        "min_interval_seconds": 0.2,
+        "cache_days": 7,
     },
     "user_profile": {
         "graduate_years": [],
