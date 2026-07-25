@@ -17,6 +17,7 @@ from ..givemeoc import (
     GiveMeOCCrawler,
     GiveMeOCRecord,
     apply_givemeoc_links,
+    build_givemeoc_alias_index,
     build_givemeoc_record_index,
     givemeoc_company_key,
 )
@@ -306,14 +307,15 @@ def run_daily_workflow(
                     # Match only affected companies for an incomplete incremental
                     # crawl; a complete snapshot still reconciles every stored job.
                     aliases = config.get("system_taxonomy", {}).get("company_aliases", {})
+                    normalized_aliases = build_givemeoc_alias_index(aliases)
                     record_index = build_givemeoc_record_index(link_result.records, aliases)
                     changed_company_keys = {
-                        givemeoc_company_key(job.company, aliases)
+                        givemeoc_company_key(job.company, aliases, normalized_aliases)
                         for job in crawl.jobs
                         if job.company
                     }
                     changed_company_keys.update(
-                        givemeoc_company_key(record.company, aliases)
+                        givemeoc_company_key(record.company, aliases, normalized_aliases)
                         for record in link_result.records
                         if cached_records_by_id.get(record.source_record_id) != record
                     )
@@ -328,7 +330,7 @@ def run_daily_workflow(
                         if link_result.complete
                         else [
                             job for job in jobs_by_key.values()
-                            if givemeoc_company_key(job.company, aliases) in changed_company_keys
+                            if givemeoc_company_key(job.company, aliases, normalized_aliases) in changed_company_keys
                         ]
                     ) + [job for job in crawl.jobs if not job.dedupe_key]
                     matched_links = apply_givemeoc_links(
@@ -336,6 +338,7 @@ def run_daily_workflow(
                         link_result,
                         aliases,
                         record_index,
+                        normalized_aliases,
                     )
                     repo.reconcile_givemeoc_links(link_jobs, complete=link_result.complete)
                     if False and config.get("official_jobs", {}).get("enabled", False):
@@ -343,7 +346,7 @@ def run_daily_workflow(
                             config,
                             cancel_check=is_cancelled,
                             progress=lambda detail: reporter.stage(
-                                "daily", 2, 6, "鎶撳彇瀹樻柟宀椾綅", detail=detail,
+                                "daily", 2, 6, "抓取官方岗位", detail=detail,
                             ),
                         ).crawl(
                             record
@@ -368,7 +371,7 @@ def run_daily_workflow(
                                     config,
                                     cancel_check=is_cancelled,
                                     progress=lambda detail: reporter.stage(
-                                        "daily", 2, 6, "鎶撳彇瀹樻柟宀椾綅", detail=detail,
+                                        "daily", 2, 6, "抓取官方岗位", detail=detail,
                                     ),
                                 ),
                                 links_complete=link_result.complete,
@@ -377,7 +380,7 @@ def run_daily_workflow(
                             official_result = batch.official_result
                             jobs_for_ingest = list(batch.jobs)
                         if official_result.errors:
-                            errors.append(_stage_error("official_jobs", "official_jobs_partial", "瀹樻柟宀椾綅琛ュ厖閮ㄥ垎澶辫触"))
+                            errors.append(_stage_error("official_jobs", "official_jobs_partial", "官方岗位补充部分失败"))
                     if config.get("official_jobs", {}).get("enabled", False):
                         batch = build_official_job_batch(
                             crawl.jobs,
@@ -388,7 +391,7 @@ def run_daily_workflow(
                                 config,
                                 cancel_check=is_cancelled,
                                 progress=lambda detail: reporter.stage(
-                                    "daily", 2, 6, "鎶撳彇瀹樻柟宀椾綅", detail=detail,
+                                    "daily", 2, 6, "抓取官方岗位", detail=detail,
                                 ),
                             ),
                             links_complete=link_result.complete,
@@ -397,7 +400,7 @@ def run_daily_workflow(
                         official_result = batch.official_result
                         jobs_for_ingest = list(batch.jobs)
                         if official_result.errors:
-                            errors.append(_stage_error("official_jobs", "official_jobs_partial", "瀹樻柟宀椾綅琛ュ厖閮ㄥ垎澶辫触"))
+                            errors.append(_stage_error("official_jobs", "official_jobs_partial", "官方岗位补充部分失败"))
 
                     enrich_summary = SimpleNamespace(
                         items_seen=len({job.company_normalized or job.company for job in crawl.jobs}),

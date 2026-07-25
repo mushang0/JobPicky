@@ -38,11 +38,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "stop_when_page_cached": True,
         "cache_only": False,
         "min_interval_seconds": 0.2,
+        "announcement_timeout_seconds": 10,
     },
     "official_jobs": {
         "enabled": True,
         "allow_generic": False,
         "max_details_per_source": 50,
+        # Different official sources may be checked in parallel, but each
+        # source keeps its detail-page requests serial and rate-limited.
+        "max_workers": 3,
         "min_interval_seconds": 0.2,
         "cache_days": 7,
     },

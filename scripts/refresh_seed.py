@@ -386,6 +386,7 @@ def refresh_seed(
         checkpoints = [checkpoint("scan", scan_ingestion)]
 
         if givemeoc_records:
+            match_started = time.monotonic()
             progress(f"[GiveMeOC 链接阶段] 开始匹配 {len(givemeoc_records)} 条公司记录")
             aliases = config.get("system_taxonomy", {}).get("company_aliases", {})
             record_index = build_givemeoc_record_index(givemeoc_records, aliases)
@@ -399,6 +400,10 @@ def refresh_seed(
             )
             eligible = list(link_batch.jobs)
             givemeoc_links_updated = link_batch.links_matched
+            progress(
+                f"[GiveMeOC 链接阶段] 本地匹配完成：更新 {givemeoc_links_updated} 个岗位，"
+                f"未访问网络，耗时 {time.monotonic() - match_started:.2f} 秒"
+            )
             link_ingestion = JobIngestionService(repository, config).ingest(eligible)
             with repository.connect() as connection:
                 stored_rows = [dict(row) for row in connection.execute("SELECT * FROM jobs")]

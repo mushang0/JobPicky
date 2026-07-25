@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import html as html_lib
 import json
 import re
@@ -403,9 +404,13 @@ class OfficialJobCrawler:
         self.cancel_check = cancel_check or (lambda: False)
 
     def crawl(self, records: Iterable[Any]) -> OfficialCrawlResult:
-        records = tuple(records)
+        records = self._unique_records(records)
         aliases = self.config.get("system_taxonomy", {}).get("company_aliases", {})
         limit = max(1, int(self.config.get("official_jobs", {}).get("max_details_per_source", 50)))
+        configured_workers = int(self.config.get("official_jobs", {}).get("max_workers", 8) or 8)
+        max_workers = max(1, min(configured_workers, 10))
+        if max_workers > 1 and len(records) > 1:
+            return self._crawl_parallel(records, aliases, limit, max_workers)
         jobs: list[Job] = []
         errors: list[str] = []
         sources_checked = details_checked = rejected = 0
@@ -428,7 +433,8 @@ class OfficialJobCrawler:
                 jobs.extend(dynamic_jobs)
                 details_checked += len(dynamic_jobs)
                 links = [] if dynamic_jobs else ([source_url] if _json_ld(soup) else self._detail_links(soup, source_url, platform, limit))
-                for detail_url in links[:limit]:
+                detail_links = self._unique_urls(links)[:limit]
+                for detail_url in detail_links:
                     if self.cancel_check():
                         break
                     details_checked += 1
@@ -448,7 +454,7 @@ class OfficialJobCrawler:
                         jobs.append(job)
                     else:
                         rejected += 1
-                    if detail_url != links[-1]:
+                    if detail_url != detail_links[-1]:
                         self.sleep(float(self.config.get("official_jobs", {}).get("min_interval_seconds", 0)))
             except Exception as exc:
                 errors.append(f"{company}: {type(exc).__name__}")
@@ -457,6 +463,119 @@ class OfficialJobCrawler:
             )
         unique = {job.dedupe_key or job.detail_url: job for job in jobs}
         return OfficialCrawlResult(tuple(unique.values()), sources_checked, details_checked, rejected, tuple(errors))
+
+    @staticmethod
+    def _unique_records(records: Iterable[Any]) -> tuple[Any, ...]:
+        unique: list[Any] = []
+        seen_sources: set[str] = set()
+        for record in records:
+            source_key = str(getattr(record, "official_url", "") or "").strip().rstrip("/").casefold()
+            if not source_key or source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
+            unique.append(record)
+        return tuple(unique)
+
+    @staticmethod
+    def _unique_urls(urls: Iterable[str]) -> tuple[str, ...]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            normalized = str(url or "").strip()
+            key = normalized.rstrip("/").casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(normalized)
+        return tuple(unique)
+
+    def _crawl_parallel(
+        self,
+        records: tuple[Any, ...],
+        aliases: dict[str, list[str]] | None,
+        limit: int,
+        max_workers: int,
+    ) -> OfficialCrawlResult:
+        """Fetch different official sources concurrently, one source at a time.
+
+        The worker boundary is the official source URL.  Detail links and
+        platform API calls inside one source remain serial, preserving the
+        existing request interval and avoiding duplicate source requests.
+        """
+        total_records = len(records)
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="official-job") as executor:
+            results = list(
+                executor.map(
+                    lambda item: self._crawl_one_source(item[1], item[0], total_records, aliases, limit),
+                    enumerate(records, start=1),
+                )
+            )
+        jobs = [job for result in results for job in result[0]]
+        unique = {job.dedupe_key or job.detail_url: job for job in jobs}
+        return OfficialCrawlResult(
+            tuple(unique.values()),
+            sum(result[1] for result in results),
+            sum(result[2] for result in results),
+            sum(result[3] for result in results),
+            tuple(error for result in results for error in result[4]),
+        )
+
+    def _crawl_one_source(
+        self,
+        record: Any,
+        index: int,
+        total_records: int,
+        aliases: dict[str, list[str]] | None,
+        limit: int,
+    ) -> tuple[list[Job], int, int, int, list[str]]:
+        if self.cancel_check():
+            return [], 0, 0, 0, []
+        source_url = str(getattr(record, "official_url", "") or "").strip()
+        company = str(getattr(record, "company", "") or "").strip()
+        if not source_url or not company:
+            return [], 0, 0, 0, []
+        self.progress(f"官方岗位补充 {index}/{total_records}: {company} ({identify_official_platform(source_url) or 'generic'})")
+        jobs: list[Job] = []
+        errors: list[str] = []
+        details_checked = rejected = 0
+        try:
+            response = self.get(source_url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            platform = identify_official_platform(source_url)
+            dynamic_jobs = self._dynamic_jobs(response.text, source_url, company, platform, aliases, limit)
+            jobs.extend(dynamic_jobs)
+            details_checked += len(dynamic_jobs)
+            links = [] if dynamic_jobs else ([source_url] if _json_ld(soup) else self._detail_links(soup, source_url, platform, limit))
+            detail_links = self._unique_urls(links)[:limit]
+            for detail_index, detail_url in enumerate(detail_links):
+                if self.cancel_check():
+                    break
+                details_checked += 1
+                html = response.text if detail_url == source_url else self._fetch(detail_url)
+                if html is None:
+                    rejected += 1
+                    continue
+                job = parse_official_job(
+                    html,
+                    source_url=source_url,
+                    detail_url=detail_url,
+                    company=company,
+                    aliases=aliases,
+                    platform=platform,
+                )
+                if job:
+                    jobs.append(job)
+                else:
+                    rejected += 1
+                if detail_index < len(detail_links) - 1:
+                    self.sleep(float(self.config.get("official_jobs", {}).get("min_interval_seconds", 0)))
+        except Exception as exc:
+            errors.append(f"{company}: {type(exc).__name__}")
+        self.progress(
+            f"官方岗位补充 {index}/{total_records}: {company} 完成，累计岗位 {len(jobs)}"
+        )
+        return jobs, 1, details_checked, rejected, errors
 
     def _dynamic_jobs(
         self,
@@ -667,6 +786,7 @@ def merge_official_jobs(
             merged = replace(
                 official,
                 dedupe_key=match.dedupe_key,
+                raw_title=match.raw_title or official.raw_title,
                 batch=official.batch or match.batch,
                 target_graduate_year=official.target_graduate_year or match.target_graduate_year,
                 degree=official.degree or match.degree,

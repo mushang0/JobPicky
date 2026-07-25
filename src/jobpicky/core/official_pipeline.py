@@ -8,8 +8,8 @@ from ..givemeoc import (
     GiveMeOCCrawlResult,
     GiveMeOCRecord,
     apply_givemeoc_links,
+    build_givemeoc_alias_index,
     build_givemeoc_record_index,
-    match_givemeoc_record,
 )
 from ..models import Job
 from ..official_jobs import OfficialCrawlResult, OfficialJobCrawler, identify_official_platform, merge_official_jobs
@@ -21,6 +21,10 @@ class OfficialJobBatch:
     matched_records: tuple[GiveMeOCRecord, ...]
     official_result: OfficialCrawlResult
     links_matched: int
+
+
+def _official_source_key(value: str | None) -> str:
+    return str(value or "").strip().rstrip("/").casefold()
 
 
 def _official_cache_is_fresh(job: Job, now: datetime, cache_days: int) -> bool:
@@ -59,35 +63,43 @@ def build_official_job_batch(
     all_records = tuple(records)
     existing_jobs = list(existing_jobs)
     aliases = config.get("system_taxonomy", {}).get("company_aliases", {})
+    normalized_aliases = build_givemeoc_alias_index(aliases)
     record_index = record_index or build_givemeoc_record_index(all_records, aliases)
     links_matched = apply_givemeoc_links(
         source_jobs,
         GiveMeOCCrawlResult(records=all_records, pages_scanned=0, complete=links_complete),
         aliases,
         record_index,
+        normalized_aliases,
     )
 
+    records_by_id = {record.source_record_id: record for record in all_records}
     matched: list[GiveMeOCRecord] = []
     seen_ids: set[str] = set()
     for job in source_jobs:
-        record = match_givemeoc_record(job, all_records, aliases, record_index)
+        record = records_by_id.get(job.givemeoc_record_id or "")
         if record and record.official_url and record.source_record_id not in seen_ids:
             matched.append(record)
             seen_ids.add(record.source_record_id)
 
     official_config = config.get("official_jobs", {})
     allow_generic = bool(official_config.get("allow_generic", False))
-    crawl_records = tuple(
-        record
-        for record in matched
-        if identify_official_platform(record.official_url) != "generic" or allow_generic
-    )
+    crawl_records: list[GiveMeOCRecord] = []
+    seen_sources: set[str] = set()
+    for record in matched:
+        if identify_official_platform(record.official_url) == "generic" and not allow_generic:
+            continue
+        source_key = _official_source_key(record.official_url)
+        if not source_key or source_key in seen_sources:
+            continue
+        seen_sources.add(source_key)
+        crawl_records.append(record)
     # ponytail: use existing official rows as a short-lived source cache;
     # add a source-state table when zero-result/error caching or HTTP validators matter.
     cached_by_source: dict[str, list[Job]] = {}
     for job in existing_jobs:
         if job.source == "official" and job.source_url:
-            cached_by_source.setdefault(job.source_url, []).append(job)
+            cached_by_source.setdefault(_official_source_key(job.source_url), []).append(job)
 
     cache_days = int(official_config.get("cache_days", 7) or 0)
     cached_jobs: list[Job] = []
@@ -96,7 +108,7 @@ def build_official_job_batch(
     official_enabled = fetch_official and official_config.get("enabled", True)
     if official_enabled:
         for record in crawl_records:
-            cached = cached_by_source.get(record.official_url or "", [])
+            cached = cached_by_source.get(_official_source_key(record.official_url), [])
             cached_jobs.extend(cached)
             if not cached or not all(_official_cache_is_fresh(job, now, cache_days) for job in cached):
                 records_to_fetch.append(record)
@@ -111,13 +123,17 @@ def build_official_job_batch(
     official_jobs_for_merge = tuple(cached_by_key.values())
     official_result = fetched_result
 
-    record_by_url = {record.official_url: record for record in matched if record.official_url}
+    record_by_url = {
+        _official_source_key(record.official_url): record
+        for record in matched
+        if record.official_url
+    }
     official_jobs = tuple(
         replace(
             job,
-            announcement_url=record_by_url.get(job.source_url).announcement_url if record_by_url.get(job.source_url) else job.announcement_url,
-            announcement_url_source="givemeoc" if record_by_url.get(job.source_url) and record_by_url[job.source_url].announcement_url else job.announcement_url_source,
-            givemeoc_record_id=record_by_url.get(job.source_url).source_record_id if record_by_url.get(job.source_url) else job.givemeoc_record_id,
+            announcement_url=record_by_url.get(_official_source_key(job.source_url)).announcement_url if record_by_url.get(_official_source_key(job.source_url)) else job.announcement_url,
+            announcement_url_source="givemeoc" if record_by_url.get(_official_source_key(job.source_url)) and record_by_url[_official_source_key(job.source_url)].announcement_url else job.announcement_url_source,
+            givemeoc_record_id=record_by_url.get(_official_source_key(job.source_url)).source_record_id if record_by_url.get(_official_source_key(job.source_url)) else job.givemeoc_record_id,
         )
         for job in official_jobs_for_merge
     )

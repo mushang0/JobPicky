@@ -18,6 +18,17 @@ from .normalizer import company_group_key
 from .locations import location_options, province_city_names
 
 
+def _filter_values(value: str | Iterable[str]) -> list[str]:
+    values = value if not isinstance(value, str) else [value]
+    result: list[str] = []
+    for item in values:
+        text = str(item or "")
+        for separator in (";", "；", ",", "，"):
+            text = text.replace(separator, "\n")
+        result.extend(part.strip() for part in text.splitlines() if part.strip())
+    return list(dict.fromkeys(result))
+
+
 class _ClosingConnection(sqlite3.Connection):
     """Close SQLite connections when a context-manager block exits."""
 
@@ -705,11 +716,21 @@ class JobRepository:
             conditions.append("(LOWER(COALESCE(jobs.clean_title, jobs.title, '')) LIKE ? OR LOWER(COALESCE(jobs.company, '')) LIKE ?)")
             term = f"%{query.lower()}%"
             params.extend((term, term))
-        if city:
-            conditions.append("(';' || REPLACE(COALESCE(jobs.city, ''), '；', ';') || ';') LIKE ?")
-            params.append(f"%;{city};%")
-        if province:
-            province_names = province_city_names(province)
+        city_values = _filter_values(city)
+        if city_values:
+            city_conditions = [
+                "(';' || REPLACE(COALESCE(jobs.city, ''), '；', ';') || ';') LIKE ?"
+                for _ in city_values
+            ]
+            conditions.append(f"({' OR '.join(city_conditions)})")
+            params.extend(f"%;{value};%" for value in city_values)
+        province_values = _filter_values(province)
+        if province_values:
+            province_names = list(dict.fromkeys(
+                name
+                for value in province_values
+                for name in province_city_names(value)
+            ))
             if province_names:
                 province_conditions = []
                 for name in province_names:

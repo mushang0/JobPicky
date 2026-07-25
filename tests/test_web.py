@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from jobpicky.models import Job
+from jobpicky.models import Job, Position
 from jobpicky.core import packaged_seed_job_count
 from jobpicky.paths import AppPaths
 from jobpicky.runtime import RunEvent
@@ -113,6 +113,37 @@ def test_web_jobs_use_concise_discovery_summary_without_exposing_raw_title(tmp_p
     assert "raw_title" not in detail
 
 
+def test_company_detail_collapses_duplicate_wondercv_announcements(tmp_path: Path):
+    paths = AppPaths(tmp_path / "profile")
+    repo = JobRepository(paths.database)
+    repo.init_schema()
+    for index, summary in enumerate((
+        "字节跳动2027校园招聘AI产品经理早鸟通道提前批，面向2027届毕业生。",
+        "字节跳动2027届校园招聘AI产品经理早鸟通道正式启动，面向全球毕业生。",
+    ), start=1):
+        repo.upsert_job(Job(
+            source="WonderCV",
+            source_job_id=f"bytedance-{index}",
+            dedupe_key=f"WonderCV:id:bytedance-{index}",
+            company="北京字节跳动科技有限公司",
+            title="北京字节跳动科技有限公司",
+            raw_title=f"民企 互联网 收录 2026.07.{13 + index} 北京字节跳动科技有限公司 {summary} 上海市 北京市 秋招 本科 AI产品经理",
+            summary=summary,
+            city="上海市;北京市;深圳市",
+            deadline="2026-08-02",
+            positions=[Position(title="AI产品经理")],
+        ))
+    client = TestClient(create_app(paths))
+
+    card = client.get("/api/jobs").json()["items"][0]
+    detail = client.get(f"/api/companies/{card['company_key']}").json()
+
+    assert len(detail["jobs"]) == 1
+    assert detail["position_count"] == 1
+    assert detail["card_summary"].startswith("字节跳动2027校园招聘")
+    assert "announcement_count" not in detail
+
+
 def test_task_progress_keeps_a_bounded_unique_activity_stream(tmp_path: Path):
     manager = TaskManager(AppPaths(tmp_path / "profile"))
     manager._tasks["scan-1"] = {"task_id": "scan-1", "status": "running"}
@@ -166,13 +197,13 @@ def test_web_ui_exposes_local_first_product_structure(tmp_path: Path):
     assert 'api("/api/preferences/rematch"' in script
     assert "ensureTaskPanel" in script
     assert "data-page-jump" in script
-    assert "招聘批次" in script
+    assert "招聘公告" in script
     assert page.count('class="button secondary scan-button"') == 2
     assert 'class="button secondary" href="${escapeHtml(apply)}"' in script
     assert 'actions.classList.toggle("action-ready",ready)' in script
-    assert 'fields=[["城市",location],["招聘批次"' in script
+    assert '岗位数量' in script
     assert '["企业性质",job.company_type]' not in script
-    assert '<dt class="sr-only">${field}</dt>' in script
+    assert '<dt class="sr-only">岗位数量</dt>' in script
     assert 'class="role-browser"' in page
     assert "data-role-select-all" in script
     assert "particleCount:24" in script

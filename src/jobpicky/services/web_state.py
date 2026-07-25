@@ -178,22 +178,85 @@ class WebStateService:
         item = dict(item)
         raw_title = item.pop("raw_title", "")
         item["card_summary"] = extract_wondercv_card_summary(raw_title) or item.get("summary")
-        item["announcement_url"] = item.pop("verified_announcement_url", None)
+        item["announcement_url"] = item.pop("verified_announcement_url", None) or item.get("announcement_url")
         item["official_url"] = item.pop("verified_official_url", None) or item.get("official_url")
         item["detail_url"] = item.pop("legacy_detail_url", None)
         item["apply_url"] = None
         return item
 
+    @staticmethod
+    def _announcement_key(row: dict[str, Any]) -> str:
+        record_id = str(row.get("givemeoc_record_id") or "").strip()
+        if record_id:
+            return f"record:{record_id}"
+        url = str(row.get("announcement_url") or "").strip().rstrip("/").casefold()
+        if url:
+            return f"url:{url}"
+        if str(row.get("source") or "").casefold() == "wondercv":
+            position_titles = sorted(
+                "".join(char for char in str(position.get("title") or "").casefold() if char.isalnum())
+                for position in (row.get("positions") or [])
+                if str(position.get("title") or "").strip()
+            )
+            if position_titles:
+                signature = (
+                    str(row.get("company") or "").casefold(),
+                    str(row.get("title") or "").casefold(),
+                    str(row.get("deadline") or "").casefold(),
+                    str(row.get("city") or "").casefold(),
+                    ",".join(position_titles),
+                )
+                return "signature:" + "|".join(signature)
+        return f"job:{row.get('job_id') or row.get('id') or id(row)}"
+
+    @classmethod
+    def _collapse_company_jobs(
+        cls, rows: list[dict[str, Any]], limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Collapse source rows that came from the same recruitment announcement."""
+        groups: dict[str, dict[str, Any]] = {}
+        position_keys: dict[str, set[str]] = {}
+        for row in rows:
+            key = cls._announcement_key(row)
+            if key not in groups:
+                groups[key] = dict(row)
+                groups[key]["positions"] = [dict(position) for position in (row.get("positions") or [])]
+                position_keys[key] = {
+                    str(position.get("title") or "").strip().casefold()
+                    for position in groups[key]["positions"]
+                    if str(position.get("title") or "").strip()
+                }
+                continue
+            target = groups[key]
+            known = position_keys[key]
+            for position in (row.get("positions") or []):
+                title = str(position.get("title") or "").strip()
+                position_key = title.casefold()
+                if title and position_key not in known:
+                    target["positions"].append(dict(position))
+                    known.add(position_key)
+            for field in ("announcement_url", "official_url", "deadline", "collected_date"):
+                if not target.get(field) and row.get(field):
+                    target[field] = row[field]
+        result = list(groups.values())
+        if limit is not None:
+            result = result[:limit]
+        return result
+
     def _company_card(self, group: dict[str, Any], repo) -> dict[str, Any]:
         rows = [self._public_job(row) for row in group.get("jobs", [])]
-        primary = dict(rows[0]) if rows else {"company": group.get("company", "")}
+        primary_row = next(
+            (row for row in rows if str(row.get("source") or "").casefold() == "wondercv" and row.get("card_summary")),
+            rows[0] if rows else {"company": group.get("company", "")},
+        )
+        primary = dict(primary_row)
         titles = [row.get("matched_position_title") or row.get("title") for row in rows]
         titles = list(dict.fromkeys(title for title in titles if title))
         primary.update({
             "company": group.get("company") or primary.get("company", ""),
             "company_key": group["company_key"],
             "jobs": rows,
-            "job_count": len(rows),
+            "job_count": min(3, len(self._collapse_company_jobs(rows))),
             "position_count": len(titles),
             "position_titles": titles,
             "matched_position_title": titles[0] if titles else "",
@@ -267,8 +330,36 @@ class WebStateService:
         for row in group["jobs"]:
             detail = repo.get_job_detail(int(row["job_id"]))
             jobs.append(self._public_job(detail or row))
-        card = self._company_card({**group, "jobs": jobs}, repo)
-        card["jobs"] = jobs
+        jobs.sort(key=lambda row: 0 if str(row.get("source") or "").casefold() == "wondercv" else 1)
+        collapsed = self._collapse_company_jobs(jobs)
+        visible_jobs = collapsed
+        announcement_links: list[dict[str, str]] = []
+        seen_announcements: set[str] = set()
+        official_url = ""
+        for job in collapsed:
+            announcement_url = str(job.get("announcement_url") or "").strip()
+            if announcement_url and announcement_url not in seen_announcements and len(announcement_links) < 3:
+                seen_announcements.add(announcement_url)
+                announcement_links.append({"url": announcement_url})
+            if not official_url and job.get("official_url"):
+                official_url = str(job["official_url"]).strip()
+        card = self._company_card({**group, "jobs": visible_jobs}, repo)
+        card["jobs"] = visible_jobs
+        card["card_summary"] = next(
+            (str(job.get("card_summary") or "").strip() for job in collapsed if str(job.get("card_summary") or "").strip()),
+            card.get("card_summary") or "",
+        )
+        position_titles = list(dict.fromkeys(
+            str(position.get("title") or "").strip()
+            for job in collapsed
+            for position in (job.get("positions") or [])
+            if str(position.get("title") or "").strip()
+        ))
+        card["position_count"] = len(position_titles) or len({
+            str(job.get("title") or "").strip() for job in collapsed if str(job.get("title") or "").strip()
+        })
+        card["announcement_links"] = announcement_links
+        card["official_url"] = official_url or None
         return card
 
     def scan_status(self, active_task: dict[str, Any] | None = None,

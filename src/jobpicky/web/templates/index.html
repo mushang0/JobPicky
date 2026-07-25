@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f5f5f7">
   <meta name="description" content="JobPicky 求职岗位工作台">
   <title>JobPicky · 岗位雷达</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=20260725-companycards5">
+  <link rel="stylesheet" href="/static/css/app.css?v=20260726-recruitment-detail1">
   <link rel="stylesheet" href="/static/css/liquid-glass.css?v=20260725-companycards5">
 </head>
 <body>
@@ -48,11 +48,10 @@
               <div class="recommendation-heading"><a href="#jobs" class="library-link">浏览全部岗位库 <svg><use href="#i-arrow"/></svg></a></div>
               <div id="recommendation-tabs"><section id="stats" class="stats recommendation-tabs hidden" role="tablist" aria-label="推荐岗位视图"><span class="recommendation-indicator" aria-hidden="true"></span><button class="stat" type="button" data-recommendation-scope="today" role="tab" aria-selected="true"><span>今日推荐</span><strong>0</strong></button><button class="stat" type="button" data-recommendation-scope="recommended" role="tab" aria-selected="false"><span>全部推荐</span><strong>0</strong></button><button class="stat" type="button" data-recommendation-scope="expiring" role="tab" aria-selected="false"><span>即将截止</span><strong>0</strong></button></section></div>
               <div class="toolbar recommendation-toolbar">
-                <select id="radar-filter-city" aria-label="推荐岗位城市筛选"><option value="">全部城市</option></select>
+                <select id="radar-filter-city" multiple size="1" aria-label="推荐岗位城市筛选"><option value="">全部城市</option></select>
                 <select id="radar-filter-batch" aria-label="推荐岗位招聘类型筛选"><option value="">全部类型</option></select>
                 <select id="radar-filter-direction" aria-label="推荐岗位关注方向筛选"><option value="">全部方向</option></select>
-                <select id="radar-sort" aria-label="推荐岗位排序"><option value="newest">最近收录</option><option value="deadline">截止日期</option><option value="company">公司名称</option></select>
-                <button id="clear-radar-filters" class="button ghost" type="button">清除筛选</button>
+                <select id="radar-sort" aria-label="推荐岗位排序"><option value="newest">最近收录</option><option value="deadline">截止日期</option><option value="company">公司名称</option></select><button id="clear-radar-filters" hidden type="button">清除筛选</button>
               </div>
               <p id="radar-result-count" class="result-count"></p>
               <div id="radar-jobs" class="job-grid" aria-live="polite"></div>
@@ -71,7 +70,7 @@
 
       <section id="view-jobs" class="view hidden" data-view="jobs">
         <header class="page-header"><div><a class="page-back" href="#radar"><svg><use href="#i-arrow"/></svg>返回岗位雷达</a><h1>全部岗位</h1></div><strong id="all-job-total" class="total-number"></strong></header>
-        <div class="toolbar all-job-toolbar"><label class="search-field wide"><svg><use href="#i-search"/></svg><span class="sr-only">搜索岗位或公司</span><input id="job-search" type="search" placeholder="搜索岗位或公司"></label><select id="filter-city" aria-label="城市筛选"><option value="">全部城市</option></select><select id="filter-batch" aria-label="招聘类型筛选"><option value="">全部类型</option></select><select id="filter-deadline" aria-label="截止状态筛选"><option value="">全部截止状态</option><option value="open">仍在招聘</option><option value="expiring">7 天内截止</option><option value="expired">已截止</option></select><select id="filter-company-type" aria-label="企业性质筛选"><option value="">全部企业性质</option></select><select id="job-sort" aria-label="排序"><option value="deadline">截止日期</option><option value="newest">最近收录</option><option value="company">公司名称</option></select><button id="clear-filters" class="button ghost" type="button">清除筛选</button></div>
+        <div class="toolbar all-job-toolbar"><label class="search-field wide"><svg><use href="#i-search"/></svg><span class="sr-only">搜索岗位或公司</span><input id="job-search" type="search" placeholder="搜索岗位或公司"></label><select id="filter-city" multiple size="1" aria-label="城市筛选"><option value="">全部城市</option></select><select id="filter-batch" aria-label="招聘类型筛选"><option value="">全部类型</option></select><select id="filter-deadline" aria-label="截止状态筛选"><option value="">全部截止状态</option><option value="open">仍在招聘</option><option value="expiring">7 天内截止</option><option value="expired">已截止</option></select><select id="filter-company-type" aria-label="企业性质筛选"><option value="">全部企业性质</option></select><select id="job-sort" aria-label="排序"><option value="deadline">截止日期</option><option value="newest">最近收录</option><option value="company">公司名称</option></select><button id="clear-filters" hidden type="button">清除筛选</button></div>
         <p id="job-result-count" class="result-count"></p><div id="all-jobs" class="job-grid"></div><nav id="job-pagination" class="pagination hidden" aria-label="岗位列表分页"></nav>
       </section>
 
@@ -130,6 +129,6 @@
 
   <aside id="job-drawer" class="job-modal hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="drawer-title"><div class="job-modal-backdrop" data-action="close-drawer"></div><section class="job-modal-card"><header><div><span class="detail-label">岗位详情</span><h2 id="drawer-title"></h2></div><button class="icon-button" data-action="close-drawer" type="button" aria-label="关闭详情"><svg><use href="#i-close"/></svg></button></header><div id="drawer-content" class="drawer-content"></div><footer id="drawer-actions"></footer></section></aside>
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
-  <script defer src="/static/js/app.js?v=20260725-companycards5"></script>
+  <script defer src="/static/js/app.js?v=20260726-recruitment-detail1"></script>
 </body>
 </html>

@@ -79,6 +79,33 @@ def test_official_batch_reuses_fresh_official_jobs_without_refetching(mock_confi
     assert batch.jobs[0].dedupe_key == wondercv.dedupe_key
 
 
+def test_official_batch_fetches_one_time_per_shared_source_url(mock_config):
+    config = mock_config()
+    config["official_jobs"] = {"enabled": True, "allow_generic": True}
+    shared_url = "https://careers.shared.example/jobs"
+    jobs = [
+        Job(company="Alpha", title="FPGA Engineer"),
+        Job(company="Beta", title="RTL Engineer"),
+    ]
+    records = [
+        GiveMeOCRecord("oc-alpha", "Alpha", "alpha", official_url=shared_url),
+        GiveMeOCRecord("oc-beta", "Beta", "beta", official_url=shared_url),
+    ]
+
+    class FakeOfficialCrawler:
+        def __init__(self):
+            self.records = []
+
+        def crawl(self, records_to_crawl):
+            self.records = list(records_to_crawl)
+            return OfficialCrawlResult((), len(self.records), 0)
+
+    crawler = FakeOfficialCrawler()
+    build_official_job_batch(jobs, records, config, crawler=crawler)
+
+    assert [record.official_url for record in crawler.records] == [shared_url]
+
+
 def test_official_batch_runs_match_merge_and_database_write(tmp_path, mock_config):
     config = mock_config()
     config["official_jobs"] = {"enabled": True, "allow_generic": True}

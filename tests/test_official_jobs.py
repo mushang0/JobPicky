@@ -246,6 +246,7 @@ def test_official_job_replaces_matching_wondercv_job_but_keeps_one_key():
         company="Acme",
         title="FPGA Engineer",
         city="Shenzhen",
+        raw_title="Acme 2027 校园招聘，面向毕业生开放 FPGA 岗位。 深圳市 本科",
         summary="list card",
     )
     official = parse_official_job(
@@ -261,6 +262,7 @@ def test_official_job_replaces_matching_wondercv_job_but_keeps_one_key():
     assert merged[0].source == "official"
     assert merged[0].dedupe_key == wondercv.dedupe_key
     assert merged[0].summary.startswith("Build and verify")
+    assert merged[0].raw_title == wondercv.raw_title
 
 
 def test_repeated_refresh_updates_previously_merged_official_row_without_duplicate():

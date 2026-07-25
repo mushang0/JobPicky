@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from jobpicky.config import load_config
-from jobpicky.givemeoc import GiveMeOCRecord, GiveMeOCCrawler, apply_givemeoc_links
+from jobpicky.givemeoc import GiveMeOCRecord, GiveMeOCCrawler, apply_givemeoc_links, build_givemeoc_record_index
 from jobpicky.storage import JobRepository
 
 from build_seed import build_seed
@@ -138,10 +138,13 @@ def main() -> int:
                 raise RuntimeError("GivemeOC crawl failed; seed update rolled back")
 
             if args.sync_job_seed:
+                aliases = config.get("system_taxonomy", {}).get("company_aliases", {})
+                record_index = build_givemeoc_record_index(result.records, aliases)
                 matched = apply_givemeoc_links(
                     jobs,
                     result,
-                    config.get("system_taxonomy", {}).get("company_aliases", {}),
+                    aliases,
+                    record_index=record_index,
                 )
                 repo.reconcile_givemeoc_links(jobs, complete=True)
                 print(f"matched_jobs={matched}", flush=True)

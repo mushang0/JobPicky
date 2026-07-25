@@ -67,25 +67,40 @@ def normalize_givemeoc_company(value: str | None) -> str:
     return text
 
 
-def _company_key(value: str | None, aliases: dict[str, list[str]] | None) -> str:
+def build_givemeoc_alias_index(aliases: dict[str, list[str]] | None = None) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for canonical, names in (aliases or {}).items():
+        canonical_key = normalize_givemeoc_company(canonical)
+        for value in (canonical, *names):
+            normalized.setdefault(normalize_givemeoc_company(value), canonical_key)
+    return normalized
+
+
+def _company_key(
+    value: str | None,
+    aliases: dict[str, list[str]] | None,
+    normalized_aliases: dict[str, str] | None = None,
+) -> str:
     key = normalize_givemeoc_company(value)
-    merged_aliases = {canonical: list(names) for canonical, names in (aliases or {}).items()}
-    for canonical, names in merged_aliases.items():
-        known = {normalize_givemeoc_company(canonical), *(normalize_givemeoc_company(item) for item in names)}
-        if key in known:
-            return normalize_givemeoc_company(canonical)
-    return key
+    if normalized_aliases is None:
+        normalized_aliases = build_givemeoc_alias_index(aliases)
+    return normalized_aliases.get(key, key)
 
 
-def givemeoc_company_key(value: str | None, aliases: dict[str, list[str]] | None = None) -> str:
+def givemeoc_company_key(
+    value: str | None,
+    aliases: dict[str, list[str]] | None = None,
+    normalized_aliases: dict[str, str] | None = None,
+) -> str:
     """Return the shared company key used by GiveMeOC link matching."""
-    return _company_key(value, aliases)
+    return _company_key(value, aliases, normalized_aliases)
 
 
 def _company_match_score(
     left: str | None,
     right: str | None,
     aliases: dict[str, list[str]] | None = None,
+    normalized_aliases: dict[str, str] | None = None,
 ) -> int:
     """Score a conservative company-name match for external enrichment.
 
@@ -94,8 +109,12 @@ def _company_match_score(
     containment fallback is only allowed for names of four or more characters
     so unrelated two/three-character brands are not merged accidentally.
     """
-    left_key = _company_key(left, aliases)
-    right_key = _company_key(right, aliases)
+    left_key = _company_key(left, aliases, normalized_aliases)
+    right_key = _company_key(right, aliases, normalized_aliases)
+    return _company_match_score_keys(left_key, right_key)
+
+
+def _company_match_score_keys(left_key: str, right_key: str) -> int:
     if not left_key or not right_key:
         return 0
     if left_key == right_key:
@@ -104,6 +123,17 @@ def _company_match_score(
     if len(shorter) >= 4 and shorter in longer:
         return 70
     return 0
+
+
+def _build_record_key_cache(
+    records: tuple[GiveMeOCRecord, ...],
+    aliases: dict[str, list[str]] | None,
+    normalized_aliases: dict[str, str],
+) -> dict[str, str]:
+    return {
+        record.source_record_id: _company_key(record.company, aliases, normalized_aliases)
+        for record in records
+    }
 
 
 def _external_url(value: str | None) -> str | None:
@@ -224,8 +254,10 @@ class GiveMeOCCrawler:
         self.cache_initialized = initialized
 
     def crawl(self, jobs: list[Job], mode: str = "daily") -> GiveMeOCCrawlResult:
+        aliases = self.config.get("system_taxonomy", {}).get("company_aliases", {})
+        normalized_aliases = build_givemeoc_alias_index(aliases)
         target_keys = {
-            _company_key(job.company, self.config.get("system_taxonomy", {}).get("company_aliases", {}))
+            _company_key(job.company, aliases, normalized_aliases)
             for job in jobs
             if job.company
         }
@@ -235,6 +267,14 @@ class GiveMeOCCrawler:
         records: dict[str, GiveMeOCRecord] = {
             record.source_record_id: record for record in self.cached_records
         }
+        resolved_official_by_announcement = {
+            record.announcement_url.rstrip("/"): record.official_url
+            for record in records.values()
+            if record.announcement_url and record.official_url
+        }
+        announcement_timeout = float(
+            self.config.get("givemeoc", {}).get("announcement_timeout_seconds", 10)
+        )
         pages_scanned = 0
         total_pages = 1
         effective_mode = "init" if mode == "init" or not self.cache_initialized else mode
@@ -258,29 +298,6 @@ class GiveMeOCCrawler:
                     record.source_record_id in records for record in page_records
                 )
                 for record in page_records:
-                    record_key = _company_key(
-                        record.company,
-                        self.config.get("system_taxonomy", {}).get("company_aliases", {}),
-                    )
-                    target_record = any(
-                        _company_match_score(job.company, record.company, self.config.get("system_taxonomy", {}).get("company_aliases", {}))
-                        for job in jobs
-                    )
-                    if target_record and not record.official_url and record.announcement_url:
-                        try:
-                            notice = self.get(
-                                record.announcement_url,
-                                timeout=20,
-                                headers={"User-Agent": "Mozilla/5.0"},
-                            )
-                            notice.raise_for_status()
-                            official_url = extract_official_url_from_announcement(
-                                notice.text, record.announcement_url,
-                            )
-                            if official_url:
-                                record = replace(record, official_url=official_url)
-                        except Exception:
-                            pass
                     previous = records.get(record.source_record_id)
                     if previous:
                         record = replace(
@@ -288,13 +305,49 @@ class GiveMeOCCrawler:
                             announcement_url=record.announcement_url or previous.announcement_url,
                             official_url=record.official_url or previous.official_url,
                         )
+                    record_key = _company_key(
+                        record.company,
+                        aliases,
+                        normalized_aliases,
+                    )
+                    target_record = record_key in target_keys or any(
+                        _company_match_score(
+                            job.company,
+                            record.company,
+                            aliases,
+                            normalized_aliases,
+                        )
+                        for job in jobs
+                    )
+                    if target_record and not record.official_url and record.announcement_url:
+                        announcement_url = record.announcement_url.rstrip("/")
+                        if announcement_url in resolved_official_by_announcement:
+                            official_url = resolved_official_by_announcement[announcement_url]
+                            record = replace(record, official_url=official_url)
+                        else:
+                            try:
+                                notice = self.get(
+                                    record.announcement_url,
+                                    timeout=announcement_timeout,
+                                    headers={"User-Agent": "Mozilla/5.0"},
+                                )
+                                notice.raise_for_status()
+                                official_url = extract_official_url_from_announcement(
+                                    notice.text, record.announcement_url,
+                                )
+                                resolved_official_by_announcement[announcement_url] = official_url
+                                if official_url:
+                                    record = replace(record, official_url=official_url)
+                            except Exception:
+                                resolved_official_by_announcement[announcement_url] = None
                     records[record.source_record_id] = record
                 target_companies_covered = all(
                     any(
                         _company_match_score(
                             job.company,
                             record.company,
-                            self.config.get("system_taxonomy", {}).get("company_aliases", {}),
+                            aliases,
+                            normalized_aliases,
                         )
                         for record in records.values()
                     )
@@ -334,19 +387,31 @@ def match_givemeoc_record(
     records: tuple[GiveMeOCRecord, ...],
     aliases: dict[str, list[str]] | None = None,
     record_index: dict[str, tuple[GiveMeOCRecord, ...]] | None = None,
+    normalized_aliases: dict[str, str] | None = None,
+    record_keys: dict[str, str] | None = None,
 ) -> GiveMeOCRecord | None:
-    key = _company_key(job.company, aliases)
+    if normalized_aliases is None:
+        normalized_aliases = build_givemeoc_alias_index(aliases)
+    if record_keys is None:
+        record_keys = _build_record_key_cache(records, aliases, normalized_aliases)
+    key = _company_key(job.company, aliases, normalized_aliases)
     candidates = list(record_index.get(key, ())) if record_index is not None else []
     if not candidates:
         candidates = [
             record for record in records
-            if _company_match_score(job.company, record.company, aliases) > 0
+            if _company_match_score_keys(
+                key,
+                record_keys.get(record.source_record_id, ""),
+            ) > 0
         ]
     if not candidates:
         return None
 
     def score(record: GiveMeOCRecord) -> tuple[int, str, int]:
-        value = _company_match_score(job.company, record.company, aliases)
+        value = _company_match_score_keys(
+            key,
+            record_keys.get(record.source_record_id, ""),
+        )
         if job.batch and record.recruitment_type and job.batch in record.recruitment_type:
             value += 3
         if job.target_graduate_year and job.target_graduate_year in record.target_graduate_year:
@@ -362,9 +427,11 @@ def build_givemeoc_record_index(
     records: tuple[GiveMeOCRecord, ...],
     aliases: dict[str, list[str]] | None = None,
 ) -> dict[str, tuple[GiveMeOCRecord, ...]]:
+    normalized_aliases = build_givemeoc_alias_index(aliases)
+    record_keys = _build_record_key_cache(records, aliases, normalized_aliases)
     index: dict[str, list[GiveMeOCRecord]] = {}
     for record in records:
-        index.setdefault(_company_key(record.company, aliases), []).append(record)
+        index.setdefault(record_keys[record.source_record_id], []).append(record)
     return {key: tuple(value) for key, value in index.items()}
 
 
@@ -373,10 +440,21 @@ def apply_givemeoc_links(
     result: GiveMeOCCrawlResult,
     aliases: dict[str, list[str]] | None = None,
     record_index: dict[str, tuple[GiveMeOCRecord, ...]] | None = None,
+    normalized_aliases: dict[str, str] | None = None,
 ) -> int:
+    if normalized_aliases is None:
+        normalized_aliases = build_givemeoc_alias_index(aliases)
+    record_keys = _build_record_key_cache(result.records, aliases, normalized_aliases)
     matched = 0
     for job in jobs:
-        record = match_givemeoc_record(job, result.records, aliases, record_index)
+        record = match_givemeoc_record(
+            job,
+            result.records,
+            aliases,
+            record_index,
+            normalized_aliases,
+            record_keys,
+        )
         if record:
             matched += 1
             job.announcement_url = record.announcement_url

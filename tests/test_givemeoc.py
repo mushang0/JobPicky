@@ -42,6 +42,79 @@ def test_parse_givemeoc_rows_extracts_links_and_skips_honeypot():
     assert records[0].announcement_url == "https://mp.weixin.qq.com/s/abc"
 
 
+def test_givemeoc_uses_row_official_url_without_fetching_announcement():
+    requested = []
+
+    class Response:
+        text = """
+        <tr data-id="101">
+          <td class="crt-col-company">Example</td>
+          <td class="crt-col-links"><a href="https://careers.example/jobs">Apply</a></td>
+          <td class="crt-col-notice"><a href="https://news.example/notice">Notice</a></td>
+        </tr>
+        """
+
+        def raise_for_status(self):
+            return None
+
+    def get(url, **_kwargs):
+        requested.append(url)
+        if url != "https://www.givemeoc.com/":
+            raise AssertionError("a GiveMeOC official URL should bypass announcement fetching")
+        return Response()
+
+    result = GiveMeOCCrawler(
+        {
+            "givemeoc": {"max_pages_init": 1},
+            "system_taxonomy": {"company_aliases": {}},
+        },
+        get=get,
+        sleep=lambda _seconds: None,
+    ).crawl([Job(company="Example")], mode="init")
+
+    assert requested == ["https://www.givemeoc.com/"]
+    assert result.records[0].official_url == "https://careers.example/jobs"
+
+
+def test_givemeoc_uses_cached_official_url_without_fetching_announcement():
+    requested = []
+
+    class Response:
+        text = """
+        <tr data-id="101">
+          <td class="crt-col-company">Example</td>
+          <td class="crt-col-notice"><a href="https://news.example/notice">Notice</a></td>
+        </tr>
+        """
+
+        def raise_for_status(self):
+            return None
+
+    def get(url, **_kwargs):
+        requested.append(url)
+        if url != "https://www.givemeoc.com/":
+            raise AssertionError("a cached GiveMeOC official URL should bypass announcement fetching")
+        return Response()
+
+    crawler = GiveMeOCCrawler(
+        {
+            "givemeoc": {"max_pages_daily": 1},
+            "system_taxonomy": {"company_aliases": {}},
+        },
+        get=get,
+        sleep=lambda _seconds: None,
+    )
+    crawler.set_cache(
+        (GiveMeOCRecord("101", "Example", "example", official_url="https://careers.example/jobs"),),
+        initialized=True,
+    )
+
+    result = crawler.crawl([Job(company="Example")], mode="daily")
+
+    assert requested == ["https://www.givemeoc.com/"]
+    assert result.records[0].official_url == "https://careers.example/jobs"
+
+
 def test_givemeoc_rejects_internal_placeholder_links():
     html = """
     <tr data-id="1">
