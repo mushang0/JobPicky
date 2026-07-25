@@ -104,6 +104,39 @@ def normalize_company(company: str | None, aliases: dict[str, list[str]] | None 
     return re.sub(r"\s+", " ", text)
 
 
+def company_group_key(company: str | None, aliases: dict[str, list[str]] | None = None) -> str:
+    """Return a conservative identity key for company-level presentation.
+
+    This deliberately normalizes punctuation, legal suffixes, and leading
+    administrative names, but does not perform fuzzy matching. Fuzzy matching
+    is appropriate for external-link enrichment; it is too risky as the sole
+    rule for merging user-visible company cards.
+    """
+    text = normalize_company(company, aliases).casefold()
+    text = re.sub(r"[\s\u3000]+", "", text)
+    text = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
+    suffixes = (
+        "\u6709\u9650\u8d23\u4efb\u516c\u53f8",
+        "\u80a1\u4efd\u6709\u9650\u516c\u53f8",
+        "\u6709\u9650\u516c\u53f8",
+        "\u96c6\u56e2\u6709\u9650\u516c\u53f8",
+        "\u96c6\u56e2",
+        "\u516c\u53f8",
+    )
+    for suffix in suffixes:
+        if text.endswith(suffix) and len(text) > len(suffix):
+            text = text[: -len(suffix)]
+            break
+    # “上海艾为电子技术股份有限公司” and “艾为电子技术” should have a
+    # stable presentation key, while short names such as “上海” remain intact.
+    for location in sorted(KNOWN_CITY_NAMES, key=len, reverse=True):
+        location_key = re.sub(r"[^\w\u4e00-\u9fff]+", "", location.casefold())
+        if location_key and text.startswith(location_key) and len(text) - len(location_key) >= 4:
+            text = text[len(location_key):]
+            break
+    return text
+
+
 def build_dedupe_key(
     *,
     source: str,

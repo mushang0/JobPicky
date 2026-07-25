@@ -68,6 +68,16 @@ def canonical_location_name(value: str) -> str | None:
     return records.get(location_id or "", {}).get("name")
 
 
+def province_city_names(province: str) -> tuple[str, ...]:
+    """Return names usable when filtering stored free-text city fields."""
+    province_id = canonical_location_id(province)
+    if not province_id or not province_id.startswith("province:"):
+        return ()
+    records, _, _ = _location_index()
+    names = [record["name"] for record in records.values() if record["province_id"] == province_id]
+    return tuple(dict.fromkeys(names))
+
+
 def match_target_location(job_city: str | None, targets: list[str]) -> str | None:
     if not job_city:
         return None
@@ -88,6 +98,38 @@ def match_target_location(job_city: str | None, targets: list[str]) -> str | Non
         if target_id.startswith("province:") and any(city_to_province.get(job_id) == target_id for job_id in job_ids):
             return records[target_id]["name"]
     return None
+
+
+def _match_target_location_embedded(job_city: str | None, targets: list[str]) -> str | None:
+    """Match province/city targets inside administrative free-text values."""
+    if not job_city:
+        return None
+    records, _, city_to_province = _location_index()
+    parts = [part.strip() for part in re.split(r"[;；、,，]+", job_city) if part.strip()]
+    parts.append(job_city.strip())
+    job_ids: set[str] = set()
+    for part in parts:
+        if location_id := canonical_location_id(part):
+            job_ids.add(location_id)
+        for location_id, record in records.items():
+            name = record["name"]
+            variants = (name, re.sub(r"[省市]$", "", name))
+            if any(variant and len(variant) >= 2 and variant in part for variant in variants):
+                job_ids.add(location_id)
+    for target in targets:
+        target_id = canonical_location_id(target)
+        if target_id and target_id in job_ids:
+            return records[target_id]["name"]
+        if target_id and target_id.startswith("province:") and any(
+            city_to_province.get(job_id) == target_id for job_id in job_ids
+        ):
+            return records[target_id]["name"]
+        if not target_id and str(target).strip() in job_city:
+            return str(target).strip()
+    return None
+
+
+match_target_location = _match_target_location_embedded
 
 
 def _name_aliases(name: str) -> set[str]:

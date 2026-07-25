@@ -655,3 +655,14 @@ def test_short_ascii_keyword_requires_token_boundary():
 
     assert matcher.match(false_positive).should_push is False
     assert matcher.match(real_hit).matched_keywords == ["IC"]
+
+
+def test_role_match_mode_all_requires_every_selected_direction():
+    config = _config()
+    config["user_profile"].update(batches=[], target_cities=[], role_groups=["hardware", "chip"], role_match_mode="all")
+    config["system_taxonomy"]["role_groups"] = {"hardware": ["hardware"], "chip": ["chip"]}
+
+    result = Matcher(config).match(Job(company="Example", title="hardware chip engineer"))
+
+    assert result.should_push is True
+    assert result.matched_role_group_id == "hardware,chip"

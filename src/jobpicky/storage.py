@@ -14,6 +14,8 @@ from typing import Any, Iterable
 
 from .backup import BackupService
 from .models import Job, MatchResult, Position
+from .normalizer import company_group_key
+from .locations import location_options, province_city_names
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -692,7 +694,7 @@ class JobRepository:
     def search_jobs(
         self, *, recommended: bool = False, query: str = "", city: str = "",
         batch: str = "", direction: str = "", deadline_status: str = "",
-        company_type: str = "", new_since: str = "", sort: str = "deadline",
+        company_type: str = "", province: str = "", new_since: str = "", sort: str = "deadline",
         limit: int = 25, offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
         conditions: list[str] = []
@@ -706,6 +708,14 @@ class JobRepository:
         if city:
             conditions.append("(';' || REPLACE(COALESCE(jobs.city, ''), '；', ';') || ';') LIKE ?")
             params.append(f"%;{city};%")
+        if province:
+            province_names = province_city_names(province)
+            if province_names:
+                province_conditions = []
+                for name in province_names:
+                    province_conditions.append("(';' || REPLACE(COALESCE(jobs.city, ''), '；', ';') || ';') LIKE ?")
+                    params.append(f"%;{name};%")
+                conditions.append(f"({' OR '.join(province_conditions)})")
         if batch:
             aliases = {
                 "秋招": ("秋招", "秋季招聘"),
@@ -717,9 +727,9 @@ class JobRepository:
             conditions.append(f"(jobs.batch IN ({', '.join('?' for _ in aliases)}) OR {' OR '.join(f'{text} LIKE ?' for _ in aliases)})")
             params.extend((*aliases, *(f"%{alias}%" for alias in aliases)))
         if direction:
-            conditions.append("(COALESCE(job_matches.matched_role_group_id, '') = ? OR COALESCE(jobs.role_signals, '') LIKE ? OR COALESCE(job_matches.matched_keywords, '') LIKE ? OR COALESCE(job_matches.matched_strong_keywords, '') LIKE ? OR COALESCE(job_matches.matched_weak_keywords, '') LIKE ? OR COALESCE(latest_recommendation.recommend_reason, '') LIKE ?)")
+            conditions.append("(COALESCE(job_matches.matched_role_group_id, '') = ? OR COALESCE(job_matches.matched_role_group_id, '') LIKE ? OR COALESCE(jobs.role_signals, '') LIKE ? OR COALESCE(job_matches.matched_keywords, '') LIKE ? OR COALESCE(job_matches.matched_strong_keywords, '') LIKE ? OR COALESCE(job_matches.matched_weak_keywords, '') LIKE ? OR COALESCE(latest_recommendation.recommend_reason, '') LIKE ?)")
             term = f"%{direction}%"
-            params.extend((direction, term, term, term, term, term))
+            params.extend((direction, term, term, term, term, term, term))
         if company_type:
             conditions.append("jobs.company_type = ?")
             params.append(company_type)
@@ -745,13 +755,40 @@ class JobRepository:
             rows = conn.execute(f"{base} ORDER BY {order} LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
         return [dict(row) for row in rows], total
 
+    @staticmethod
+    def _group_company_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        groups: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            key = company_group_key(row.get("company")) or f"job:{row.get('job_id')}"
+            group = groups.setdefault(key, {"company_key": key, "company": row.get("company") or "", "jobs": []})
+            group["jobs"].append(row)
+            if not group["company"] and row.get("company"):
+                group["company"] = row["company"]
+        return list(groups.values())
+
+    def search_company_cards(self, **filters: Any) -> tuple[list[dict[str, Any]], int]:
+        """Return a company-level read model while retaining every source job."""
+        limit = int(filters.pop("limit", 25))
+        offset = int(filters.pop("offset", 0))
+        rows, _ = self.search_jobs(**filters, limit=100000, offset=0)
+        groups = self._group_company_rows(rows)
+        return groups[offset: offset + limit], len(groups)
+
+    def get_company_detail(self, company_key: str) -> dict[str, Any]:
+        groups = self._group_company_rows(self.list_all_jobs())
+        return next((group for group in groups if group["company_key"] == company_key), {})
+
     def job_facets(self) -> dict[str, list[str]]:
         with self.connect() as conn:
             city_values = [row[0] for row in conn.execute("SELECT DISTINCT city FROM jobs WHERE city IS NOT NULL AND city != '' ORDER BY city")]
             batches = [row[0] for row in conn.execute("SELECT DISTINCT batch FROM jobs WHERE batch IS NOT NULL AND batch != '' ORDER BY batch")]
             company_types = [row[0] for row in conn.execute("SELECT DISTINCT company_type FROM jobs WHERE company_type IS NOT NULL AND company_type != '' ORDER BY company_type")]
         cities = sorted({part.strip() for value in city_values for part in str(value).replace("；", ";").split(";") if part.strip()})
-        return {"cities": cities, "batches": batches, "company_types": company_types}
+        provinces = [
+            {"value": item["value"], "label": item["label"]}
+            for item in location_options()
+        ]
+        return {"cities": cities, "provinces": provinces, "batches": batches, "company_types": company_types}
 
     def count_expiring_jobs(self, days: int = 7, *, recommended: bool = False) -> int:
         recommendation_join = "JOIN recommended_jobs recommended ON recommended.job_id = jobs.id" if recommended else ""

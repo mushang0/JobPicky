@@ -13,7 +13,7 @@ function detailText(detail){if(Array.isArray(detail))return detail.join("；");i
 async function api(url,options){const response=await fetch(url,options);const data=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(detailText(data.detail||data));error.detail=data.detail;throw error}return data}
 function escapeHtml(value){return String(value??"").replace(/[&<>'"]/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]))}
 function unique(values=[]){return [...new Set(values.map(value=>String(value).trim()).filter(Boolean))]}
-function profileCopy(profile={},first=false){return{batches:first?[]:unique(profile.batches),role_groups:first?[]:unique(profile.role_groups),target_cities:first?[]:unique(profile.target_cities),custom_keywords:first?[]:unique(profile.custom_keywords),selected_company_groups:first?[]:unique(profile.selected_company_groups),custom_companies:first?[]:unique(profile.custom_companies),exclude_role_groups:first?[]:unique(profile.exclude_role_groups),cityMode:first?null:(profile.target_cities?.length?"selected":"any")}}
+function profileCopy(profile={},first=false){return{batches:first?[]:unique(profile.batches),role_groups:first?[]:unique(profile.role_groups),target_cities:first?[]:unique(profile.target_cities),custom_keywords:first?[]:unique(profile.custom_keywords),selected_company_groups:first?[]:unique(profile.selected_company_groups),custom_companies:first?[]:unique(profile.custom_companies),exclude_role_groups:first?[]:unique(profile.exclude_role_groups),role_match_mode:first?"any":(profile.role_match_mode||"any"),cityMode:first?null:(profile.target_cities?.length?"selected":"any")}}
 function stageLabel(value){return STAGE_LABELS[value]||value}
 function stageKind(profile=state.draft){return unique(profile?.batches||[]).map(stageLabel).join(" + ")}
 function setLoading(button,loading,label){if(!button)return;button.disabled=loading;button.classList.toggle("loading",loading);if(loading&&label){button.dataset.label=button.textContent;button.textContent=label}if(!loading&&button.dataset.label){button.textContent=button.dataset.label;delete button.dataset.label}}
@@ -276,3 +276,49 @@ async function init(){
 
 init();
 bindFeishuPanelActions();
+
+// Company cards are a read-model concern: source jobs remain individually
+// addressable, while the main discovery surface presents one card per company.
+function companyFilterOptions(id,label){
+  const root=$(id),city=$(id.replace("province","city"));
+  if(!root&&!city)return;
+  if(root)return;
+  if(!city?.parentElement)return;
+  const select=document.createElement("select");select.id=id;select.setAttribute("aria-label",label);city.parentElement.insertBefore(select,city);
+}
+function fillProvinceFilter(id,label){
+  companyFilterOptions(id,label);const root=$(id);if(!root)return;
+  const current=root.value,items=state.facets.provinces||[];
+  root.innerHTML=`<option value="">${label}</option>`+items.map(item=>`<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join("");root.value=current;
+  if(!root.dataset.bound){root.dataset.bound="true";root.addEventListener("change",()=>{if(id.startsWith("radar")){state.radarPage=1;loadRecommendationPage()}else{state.page=1;loadJobPage()}})}
+}
+function populateFilters(){
+  fillProvinceFilter("filter-province","全部省份");fillProvinceFilter("radar-filter-province","全部省份");
+  fillSelect("filter-city",state.facets.cities||[],"全部城市");fillSelect("filter-batch",BATCH_FILTERS,"全部类型");fillSelect("filter-company-type",state.facets.company_types||[],"全部企业性质");
+  fillSelect("radar-filter-city",state.facets.cities||[],"全部城市");fillSelect("radar-filter-batch",BATCH_FILTERS,"全部类型");fillSelect("radar-filter-direction",state.facets.directions||[],"全部方向",displayRole);
+}
+function recommendationParams(scope=state.recommendationScope,page=state.radarPage){return new URLSearchParams({scope,page:String(page),page_size:String(state.radarPageSize),province:$("radar-filter-province")?.value||"",city:$("radar-filter-city")?.value||"",batch:$("radar-filter-batch")?.value||"",direction:$("radar-filter-direction")?.value||"",sort:$("radar-sort")?.value||"newest"})}
+async function loadJobPage(){const params=new URLSearchParams({scope:"all",page:String(state.page),page_size:String(state.pageSize),query:$("job-search")?.value.trim()||"",province:$("filter-province")?.value||"",city:$("filter-city")?.value||"",batch:$("filter-batch")?.value||"",deadline_status:$("filter-deadline")?.value||"",company_type:$("filter-company-type")?.value||"",sort:$("job-sort")?.value||"deadline"});skeleton($("all-jobs"));try{const data=await api(`/api/jobs?${params}`);state.jobs=data.items;state.pages=data.pages;state.page=data.page;state.currentTotal=data.total;state.jobTotal=data.summary.all;state.facets=data.facets;populateFilters();renderAllJobs()}catch(error){$("all-jobs").innerHTML=empty("岗位加载失败",error.message,"重新加载","load-jobs")}}
+function clearFilters(){$("job-search").value="";["filter-province","filter-city","filter-batch","filter-deadline","filter-company-type"].forEach(id=>{if($(id))$(id).value=""});$("job-sort").value="deadline";state.page=1;loadJobPage()}
+function clearRadarFilters(){["radar-filter-province","radar-filter-city","radar-filter-batch","radar-filter-direction"].forEach(id=>{if($(id))$(id).value=""});$("radar-sort").value="newest";state.radarPage=1;loadRecommendationPage()}
+function jobCard(job){
+  const rows=Array.isArray(job.jobs)?job.jobs:[],company=cleanValue(job.company)||"招聘单位待确认",deadline=deadlineInfo(job.deadline),titles=unique(rows.map(row=>cleanValue(row.matched_position_title||row.title))).slice(0,4),cities=unique(rows.flatMap(row=>splitValues(row.city))).slice(0,3),summary=cardSummary(job),key=cleanValue(job.company_key)||String(job.job_id||"");
+  const tags=[...cities,...titles].slice(0,5);
+  return `<article class="job-card company-card ${deadline.expired?"expired":""}" data-action="open-company" data-company-key="${escapeHtml(key)}" data-job-id="${Number(job.job_id)||0}" tabindex="0" aria-label="查看 ${escapeHtml(company)} 的招聘岗位"><div class="job-card-top"><div class="job-card-tags"><span>${rows.length||1} 个招聘公告</span>${tags.slice(0,2).map(tag=>`<span>${escapeHtml(tag)}</span>`).join("")}</div>${deadline.label?`<span class="job-deadline ${deadline.soon?"soon":""}">${escapeHtml(deadline.label)}</span>`:""}</div><div class="job-card-body"><h3>${escapeHtml(company)}</h3><p class="job-summary">${escapeHtml(summary)}</p></div>${tags.length?`<div class="job-meta">${tags.map(value=>`<span>${escapeHtml(value)}</span>`).join("")}</div>`:""}</article>`;
+}
+async function openCompany(companyKey,trigger){
+  if(!companyKey)return;state.drawerTrigger=trigger||document.activeElement;$("drawer-title").textContent="正在读取公司招聘信息";$("drawer-content").setAttribute("aria-busy","true");$("drawer-content").innerHTML='<div class="drawer-loading"><span class="spinner"></span>正在读取招聘信息</div>';$(`drawer-actions`).innerHTML="";showDrawer(state.drawerTrigger);
+  try{const company=await api(`/api/companies/${encodeURIComponent(companyKey)}`),jobs=company.jobs||[];$("drawer-title").textContent=company.company||"招聘单位";$("drawer-content").innerHTML=`<section class="detail-intro"><p>${escapeHtml(cardSummary(company))}</p></section><dl class="detail-facts"><div><dt class="sr-only">招聘公告</dt><dd>${jobs.length} 个招聘公告</dd></div><div><dt class="sr-only">岗位数量</dt><dd>${unique(jobs.flatMap(job=>(job.positions||[]).map(position=>position.title||""))).length||unique(jobs.map(job=>job.title)).length} 个岗位</dd></div></dl>${jobs.map(job=>`<section class="detail-section"><div class="detail-section-heading"><h3>${escapeHtml(job.title||"未命名招聘")}</h3><span>${escapeHtml(primaryCity(job))}</span></div><p>${escapeHtml(cardSummary(job))}</p><div class="position-list">${(job.positions||[]).map(positionCard).join("")}</div></section>`).join("")}`;const links=jobs.flatMap(job=>[safeExternalUrl(job.announcement_url),safeExternalUrl(job.official_url)]).filter(Boolean);$("drawer-actions").innerHTML=[...new Set(links)].map((url,index)=>`<a class="button secondary" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${index%2?"前往官方投递":"查看招聘公告"}</a>`).join("")}catch(error){$("drawer-title").textContent="公司招聘详情";$("drawer-content").innerHTML=empty("公司详情加载失败",error.message)}finally{$("drawer-content").removeAttribute("aria-busy")}
+}
+document.body?.addEventListener("click",event=>{const target=event.target.closest("[data-action='open-company']");if(target)openCompany(target.dataset.companyKey,target)});
+document.body?.addEventListener("keydown",event=>{const card=event.target.closest?.("[data-action='open-company']");if(card&&(event.key==="Enter"||event.key===" ")){event.preventDefault();event.stopImmediatePropagation();openCompany(card.dataset.companyKey,card)}},true);
+const baseRenderBuilder=renderBuilder;
+function ensureRoleMatchMode(){const anchor=$("role-guidance"),step=anchor?.closest(".step-body");if(!step||$("builder-role-match-mode"))return;const label=document.createElement("label");label.className="select-field";label.innerHTML='<span>方向组合方式</span><select id="builder-role-match-mode"><option value="any">任一方向命中（推荐）</option><option value="all">同时满足全部方向</option></select>';step.insertBefore(label,anchor);const select=$("builder-role-match-mode");select.value=state.draft?.role_match_mode||"any";select.addEventListener("change",event=>{state.draft.role_match_mode=event.target.value;renderDiff()})}
+renderBuilder=function(){baseRenderBuilder();ensureRoleMatchMode();if($("builder-role-match-mode"))$("builder-role-match-mode").value=state.draft?.role_match_mode||"any"};
+const baseSaveProfile=saveProfile;
+saveProfile=function(profile){return baseSaveProfile({...profile,role_match_mode:$("builder-role-match-mode")?.value||profile.role_match_mode||state.draft?.role_match_mode||"any"})};
+ensureRoleMatchMode();
+const baseRenderAllJobs=renderAllJobs;
+renderAllJobs=function(){baseRenderAllJobs();$("job-result-count").textContent=`找到 ${state.currentTotal??(state.jobs||[]).length} 家公司`;$("all-job-total").textContent=`${state.currentTotal??state.jobTotal??0} 家公司`};
+const baseRenderRadar=renderRadar;
+renderRadar=function(){baseRenderRadar();$("radar-result-count").textContent=`${(state.recommendedJobs||[]).length?`显示 ${(state.recommendedJobs||[]).length} 家公司，`:""}共 ${state.radarCurrentTotal||0} 家公司`};

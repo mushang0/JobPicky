@@ -37,6 +37,7 @@ def role_groups() -> dict[str, list[str]]:
     for section in job_taxonomy()["sections"]:
         for direction in section["directions"]:
             groups[direction["id"]] = list(dict.fromkeys([
+                *direction.get("aliases", []),
                 *direction.get("terms", []),
             ]))
     return groups

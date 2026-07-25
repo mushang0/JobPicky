@@ -81,6 +81,30 @@ def givemeoc_company_key(value: str | None, aliases: dict[str, list[str]] | None
     return _company_key(value, aliases)
 
 
+def _company_match_score(
+    left: str | None,
+    right: str | None,
+    aliases: dict[str, list[str]] | None = None,
+) -> int:
+    """Score a conservative company-name match for external enrichment.
+
+    GiveMeOC often shortens legal names (for example “原力灵机” versus
+    “北京原力灵机智能科技有限公司”). Exact normalized matches win; a
+    containment fallback is only allowed for names of four or more characters
+    so unrelated two/three-character brands are not merged accidentally.
+    """
+    left_key = _company_key(left, aliases)
+    right_key = _company_key(right, aliases)
+    if not left_key or not right_key:
+        return 0
+    if left_key == right_key:
+        return 100
+    shorter, longer = sorted((left_key, right_key), key=len)
+    if len(shorter) >= 4 and shorter in longer:
+        return 70
+    return 0
+
+
 def _external_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -148,11 +172,23 @@ def extract_official_url_from_announcement(html: str, announcement_url: str) -> 
                 candidates.append(candidate)
     if len(candidates) == 1:
         return candidates[0]
-    preferred = [
-        candidate for candidate in candidates
-        if re.search(r"career|campus|recruit|job|apply|feishu|zhipin|liepin", candidate, re.I)
-    ]
-    return preferred[0] if len(preferred) == 1 else None
+    def link_score(candidate: str) -> int:
+        lowered = candidate.casefold()
+        score = 0
+        for keyword, points in (
+            ("feishu", 8), ("campus", 6), ("career", 5),
+            ("recruit", 5), ("apply", 5), ("job", 4),
+            ("zhipin", 3), ("liepin", 3),
+        ):
+            if keyword in lowered:
+                score += points
+        return score
+
+    preferred = [(link_score(candidate), index, candidate) for index, candidate in enumerate(candidates)]
+    preferred = [item for item in preferred if item[0] > 0]
+    if not preferred:
+        return None
+    return max(preferred, key=lambda item: (item[0], -item[1]))[2]
 
 
 def _max_page(html: str, default: int = 1) -> int:
@@ -225,7 +261,11 @@ class GiveMeOCCrawler:
                         record.company,
                         self.config.get("system_taxonomy", {}).get("company_aliases", {}),
                     )
-                    if record_key in target_keys and not record.official_url and record.announcement_url:
+                    target_record = any(
+                        _company_match_score(job.company, record.company, self.config.get("system_taxonomy", {}).get("company_aliases", {}))
+                        for job in jobs
+                    )
+                    if target_record and not record.official_url and record.announcement_url:
                         try:
                             notice = self.get(
                                 record.announcement_url,
@@ -248,10 +288,22 @@ class GiveMeOCCrawler:
                             official_url=record.official_url or previous.official_url,
                         )
                     records[record.source_record_id] = record
+                target_companies_covered = all(
+                    any(
+                        _company_match_score(
+                            job.company,
+                            record.company,
+                            self.config.get("system_taxonomy", {}).get("company_aliases", {}),
+                        )
+                        for record in records.values()
+                    )
+                    for job in jobs
+                )
                 if (
                     effective_mode == "daily"
                     and self.config.get("givemeoc", {}).get("stop_when_page_cached", True)
                     and cached_page
+                    and target_companies_covered
                 ):
                     stopped_on_cached_page = True
                     break
@@ -283,23 +335,24 @@ def match_givemeoc_record(
     record_index: dict[str, tuple[GiveMeOCRecord, ...]] | None = None,
 ) -> GiveMeOCRecord | None:
     key = _company_key(job.company, aliases)
-    candidates = (
-        list(record_index.get(key, ()))
-        if record_index is not None
-        else [record for record in records if _company_key(record.company, aliases) == key]
-    )
+    candidates = list(record_index.get(key, ())) if record_index is not None else []
+    if not candidates:
+        candidates = [
+            record for record in records
+            if _company_match_score(job.company, record.company, aliases) > 0
+        ]
     if not candidates:
         return None
 
-    def score(record: GiveMeOCRecord) -> tuple[int, str]:
-        value = 0
+    def score(record: GiveMeOCRecord) -> tuple[int, str, int]:
+        value = _company_match_score(job.company, record.company, aliases)
         if job.batch and record.recruitment_type and job.batch in record.recruitment_type:
             value += 3
         if job.target_graduate_year and job.target_graduate_year in record.target_graduate_year:
             value += 2
         if job.city and record.city and any(city.strip() in record.city for city in job.city.split(";")):
             value += 1
-        return value, record.updated_at
+        return value, record.updated_at, 1 if record.official_url else 0
 
     return max(candidates, key=score)
 

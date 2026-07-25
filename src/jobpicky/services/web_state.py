@@ -89,6 +89,9 @@ class WebStateService:
         ):
             if key in incoming_profile:
                 profile[key] = _list_values(incoming_profile[key])
+        if "role_match_mode" in incoming_profile:
+            mode = str(incoming_profile["role_match_mode"] or "any").strip().lower()
+            profile["role_match_mode"] = mode if mode in {"any", "all"} else "any"
         if set(profile.get("exclude_role_groups", [])) == set(LEGACY_DEFAULT_EXCLUDED_ROLES):
             profile["exclude_role_groups"] = []
 
@@ -170,14 +173,41 @@ class WebStateService:
         save_config(config, self.paths.config)
         return self.feishu_status()
 
+    @staticmethod
+    def _public_job(item: dict[str, Any]) -> dict[str, Any]:
+        item = dict(item)
+        raw_title = item.pop("raw_title", "")
+        item["card_summary"] = extract_wondercv_card_summary(raw_title) or item.get("summary")
+        item["announcement_url"] = item.pop("verified_announcement_url", None)
+        item["official_url"] = item.pop("verified_official_url", None) or item.get("official_url")
+        item["detail_url"] = item.pop("legacy_detail_url", None)
+        item["apply_url"] = None
+        return item
+
+    def _company_card(self, group: dict[str, Any], repo) -> dict[str, Any]:
+        rows = [self._public_job(row) for row in group.get("jobs", [])]
+        primary = dict(rows[0]) if rows else {"company": group.get("company", "")}
+        titles = [row.get("matched_position_title") or row.get("title") for row in rows]
+        titles = list(dict.fromkeys(title for title in titles if title))
+        primary.update({
+            "company": group.get("company") or primary.get("company", ""),
+            "company_key": group["company_key"],
+            "jobs": rows,
+            "job_count": len(rows),
+            "position_count": len(titles),
+            "position_titles": titles,
+            "matched_position_title": titles[0] if titles else "",
+        })
+        return primary
+
     def jobs(self, *, page: int = 1, page_size: int = 25, scope: str = "all", query: str = "",
-             city: str = "", batch: str = "", direction: str = "", deadline_status: str = "",
+             city: str = "", province: str = "", batch: str = "", direction: str = "", deadline_status: str = "",
              company_type: str = "", sort: str = "deadline", recommended: bool = False) -> dict[str, Any]:
         if not self.paths.database.is_file():
             return {"items": [], "page": 1, "page_size": page_size, "total": 0, "pages": 0,
                     "summary": {"all": 0, "recommended": 0, "today_recommended": 0,
                                 "new_recommended": 0, "expiring": 0},
-                    "facets": {"cities": [], "batches": [], "company_types": [], "directions": []}}
+                    "facets": {"cities": [], "provinces": [], "batches": [], "company_types": [], "directions": []}}
         # Reads must never bootstrap/restore the packaged seed database.
         from ..storage import JobRepository
         repo = JobRepository(self.paths.database)
@@ -189,18 +219,14 @@ class WebStateService:
         new_since = today_since if scope in {"today", "new"} else ""
         if scope == "expiring":
             deadline_status = "expiring"
-        items, total = repo.search_jobs(
+        groups, total = repo.search_company_cards(
             recommended=recommended, query=query.strip(), city=city, batch=batch,
-            direction=direction, deadline_status=deadline_status, company_type=company_type,
-            new_since=new_since, sort=sort, limit=page_size, offset=(page - 1) * page_size,
+            province=province, direction=direction, deadline_status=deadline_status,
+            company_type=company_type, new_since=new_since, sort=sort,
+            limit=page_size, offset=(page - 1) * page_size,
         )
         stats = queries.stats()
-        for item in items:
-            item["card_summary"] = extract_wondercv_card_summary(item.pop("raw_title", "")) or item.get("summary")
-            item["announcement_url"] = item.pop("verified_announcement_url", None)
-            item["official_url"] = item.pop("verified_official_url", None) or item.get("official_url")
-            item["detail_url"] = item.pop("legacy_detail_url", None)
-            item["apply_url"] = None
+        items = [self._company_card(group, repo) for group in groups]
         _, today_recommended_total = repo.search_jobs(
             recommended=True, new_since=today_since, limit=1,
         )
@@ -226,12 +252,24 @@ class WebStateService:
         from ..storage import JobRepository
         item = JobRepository(self.paths.database).get_job_detail(job_id)
         if item:
-            item["card_summary"] = extract_wondercv_card_summary(item.pop("raw_title", "")) or item.get("summary")
-            item["announcement_url"] = item.pop("verified_announcement_url", None)
-            item["official_url"] = item.pop("verified_official_url", None) or item.get("official_url")
-            item["detail_url"] = item.pop("legacy_detail_url", None)
-            item["apply_url"] = None
+            item = self._public_job(item)
         return item
+
+    def company_detail(self, company_key: str) -> dict[str, Any]:
+        if not self.paths.database.is_file():
+            return {}
+        from ..storage import JobRepository
+        repo = JobRepository(self.paths.database)
+        group = repo.get_company_detail(company_key)
+        if not group:
+            return {}
+        jobs = []
+        for row in group["jobs"]:
+            detail = repo.get_job_detail(int(row["job_id"]))
+            jobs.append(self._public_job(detail or row))
+        card = self._company_card({**group, "jobs": jobs}, repo)
+        card["jobs"] = jobs
+        return card
 
     def scan_status(self, active_task: dict[str, Any] | None = None,
                     recent_task: dict[str, Any] | None = None) -> dict[str, Any]:

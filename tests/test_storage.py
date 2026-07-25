@@ -6,6 +6,7 @@ import pytest
 
 from jobpicky.models import Job, Position
 from jobpicky.storage import JobRepository
+from jobpicky.locations import location_options
 
 
 def test_repository_upserts_new_job_and_does_not_duplicate(tmp_path: Path):
@@ -294,3 +295,30 @@ def test_repository_failed_migration_keeps_original_schema_data_and_backup(
 
     monkeypatch.setattr(JobRepository, "_ensure_columns", original_ensure_columns)
     JobRepository(db_path).init_schema()
+
+
+def test_province_filter_includes_all_child_cities(tmp_path: Path):
+    repo = JobRepository(tmp_path / "jobs.sqlite")
+    repo.init_schema()
+    guangdong = next(item for item in location_options() if item["value"] == "province:44")
+    guangzhou, shenzhen = (city["label"] for city in guangdong["cities"][:3:2])
+    repo.upsert_job(Job(dedupe_key="province:gz", company="Guangzhou Co", title="Engineer", city=guangzhou))
+    repo.upsert_job(Job(dedupe_key="province:sz", company="Shenzhen Co", title="Engineer", city=shenzhen))
+
+    rows, total = repo.search_jobs(province="province:44")
+
+    assert total == 2
+    assert {row["company"] for row in rows} == {"Guangzhou Co", "Shenzhen Co"}
+
+
+def test_company_cards_group_announcements_without_losing_source_jobs(tmp_path: Path):
+    repo = JobRepository(tmp_path / "jobs.sqlite")
+    repo.init_schema()
+    repo.upsert_job(Job(dedupe_key="company:1", company="Example Technology Co., Ltd.", title="Hardware Engineer"))
+    repo.upsert_job(Job(dedupe_key="company:2", company="Example Technology Co., Ltd.", title="Algorithm Engineer"))
+
+    cards, total = repo.search_company_cards()
+
+    assert total == 1
+    assert cards[0]["company"] == "Example Technology Co., Ltd."
+    assert {row["title"] for row in cards[0]["jobs"]} == {"Hardware Engineer", "Algorithm Engineer"}

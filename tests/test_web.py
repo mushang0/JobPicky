@@ -376,3 +376,11 @@ def test_web_setup_preview_describes_three_step_workspace_flow(tmp_path: Path):
     assert preview["table_name"] == "求职工作台"
     assert preview["baseline_items"] == SEED_JOB_COUNT
     assert not paths.database.exists()
+def test_web_persists_role_match_mode_as_scalar(tmp_path: Path):
+    client = TestClient(create_app(AppPaths(tmp_path / "profile")))
+    profile = {"batches": ["campus"], "role_groups": ["hardware"], "role_match_mode": "all"}
+
+    response = client.put("/api/preferences", json={"user_profile": profile})
+
+    assert response.status_code == 200
+    assert client.get("/api/preferences").json()["user_profile"]["role_match_mode"] == "all"

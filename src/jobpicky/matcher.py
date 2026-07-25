@@ -264,6 +264,7 @@ class Matcher:
     def _best_role_candidate(self, candidates: list[dict]) -> tuple[str, list[str], list[str], dict]:
         best: tuple[int, str, list[str], list[str], dict] | None = None
         for candidate in candidates:
+            matched_groups: list[tuple[str, list[str], list[str], int]] = []
             for group, keywords in self.role_groups:
                 title_hits = self._match_many(candidate["title"], keywords)
                 hits = list(dict.fromkeys([*title_hits, *self._match_many(candidate["text"], keywords)]))
@@ -274,6 +275,20 @@ class Matcher:
                 score = 90 + min(8, len(title_hits) * 2 + len(hits) + len(weak_hits) + (3 if direction_hit else 0))
                 if not hits and candidate["title"]:
                     hits = [candidate["title"]]
+                matched_groups.append((group, hits, weak_hits, score))
+            if self.profile.get("role_match_mode", "any") == "all":
+                if len(matched_groups) < len(self.role_groups):
+                    continue
+                role_group = ",".join(group for group, *_ in matched_groups)
+                strong_hits = list(dict.fromkeys(hit for _, hits, _, _ in matched_groups for hit in hits))
+                weak_hits = list(dict.fromkeys(hit for _, _, hits, _ in matched_groups for hit in hits))
+                score = min(100, sum(item[3] for item in matched_groups) // len(matched_groups) + 5)
+                ranked = dict(candidate, score=score)
+                item = (score, role_group, strong_hits, weak_hits, ranked)
+                if best is None or item[0] > best[0]:
+                    best = item
+                continue
+            for group, hits, weak_hits, score in matched_groups:
                 ranked = dict(candidate, score=score)
                 item = (score, group, hits, weak_hits, ranked)
                 if best is None or item[0] > best[0]:

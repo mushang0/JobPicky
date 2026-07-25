@@ -33,7 +33,7 @@ from ..services.web_state import WebStateService
 
 
 class PreferencesPayload(BaseModel):
-    user_profile: dict[str, list[str]] = Field(default_factory=dict)
+    user_profile: dict[str, Any] = Field(default_factory=dict)
     feishu: dict[str, str] = Field(default_factory=dict)
 
 
@@ -349,10 +349,10 @@ def create_app(paths: AppPaths | None = None) -> FastAPI:
 
     @app.get("/api/jobs")
     def jobs(page: int = 1, page_size: int = 25, scope: str = "all", query: str = "",
-             city: str = "", batch: str = "", direction: str = "", deadline_status: str = "",
+             city: str = "", province: str = "", batch: str = "", direction: str = "", deadline_status: str = "",
              company_type: str = "", sort: str = "deadline", recommended: bool = False) -> dict[str, Any]:
         return state.jobs(page=page, page_size=page_size, scope=scope, query=query, city=city,
-                          batch=batch, direction=direction, deadline_status=deadline_status,
+                          province=province, batch=batch, direction=direction, deadline_status=deadline_status,
                           company_type=company_type, sort=sort, recommended=recommended)
 
     @app.get("/api/jobs/{job_id}")
@@ -360,6 +360,13 @@ def create_app(paths: AppPaths | None = None) -> FastAPI:
         item = state.job_detail(job_id)
         if not item:
             raise HTTPException(status_code=404, detail="岗位不存在")
+        return item
+
+    @app.get("/api/companies/{company_key}")
+    def company_detail(company_key: str) -> dict[str, Any]:
+        item = state.company_detail(company_key)
+        if not item:
+            raise HTTPException(status_code=404, detail="公司不存在")
         return item
 
     @app.get("/api/scan/status")

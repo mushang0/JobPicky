@@ -57,6 +57,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "selected_company_groups": [],
         "custom_companies": [],
         "exclude_role_groups": [],
+        "role_match_mode": "any",
         "recall_mode": "balanced",
         "daily_push_limit": 20,
     },
@@ -285,6 +286,7 @@ def _config_for_storage(config: dict[str, Any]) -> dict[str, Any]:
         "selected_company_groups",
         "custom_companies",
         "exclude_role_groups",
+        "role_match_mode",
         "recall_mode",
         "daily_push_limit",
     )

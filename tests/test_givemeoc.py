@@ -65,6 +65,27 @@ def test_extract_official_url_from_announcement_accepts_explicit_career_link():
     )
 
 
+def test_extract_official_url_prefers_high_confidence_link_when_notice_has_multiple_urls():
+    html = (
+        '<a href="https://example.com/company-profile">公司介绍</a>'
+        '<a href="https://dexmal-inc.jobs.feishu.cn/285572/position/list">官方投递</a>'
+    )
+
+    assert extract_official_url_from_announcement(html, "https://news.example/notice") == (
+        "https://dexmal-inc.jobs.feishu.cn/285572/position/list"
+    )
+
+
+def test_company_match_accepts_short_external_company_name():
+    record = GiveMeOCRecord(
+        "oryx", "原力灵机", "原力灵机",
+        announcement_url="https://news.example/oryx",
+        official_url="https://dexmal-inc.jobs.feishu.cn/285572/position/list",
+    )
+
+    assert match_givemeoc_record(Job(company="北京原力灵机智能科技有限公司"), (record,)).source_record_id == "oryx"
+
+
 def test_company_match_prefers_batch_and_year():
     job = Job(company="影石Insta360", batch="秋招", target_graduate_year="2027届")
     records = (
