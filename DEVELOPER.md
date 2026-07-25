@@ -104,6 +104,39 @@ python scripts/ui_sandbox.py clean
 仓库内部明确指定的沙盒目录，并带有路径保护，不会删除仓库根目录。通常无需手动
 清理，因为下一次 `fresh` 会自动重建。
 
+### 首页停在“正在准备岗位雷达”时的快速排查
+
+先停止当前服务，再用 `fresh` 重建；`fresh` 安装的是启动瞬间的非 editable
+代码快照，之后修改源码不会影响已经运行的服务：
+
+```powershell
+python scripts/ui_sandbox.py fresh --no-browser
+```
+
+只看 Uvicorn 日志即可判断卡点：
+
+- 已请求 `/static/js/app.js`，但没有 `/api/onboarding/options`、`/api/preferences`
+  和 `/api/scan/status`：前端入口没有进入初始化，优先检查脚本执行链、模块解析和
+  浏览器缓存，不要先查 JSON 或岗位数据库。
+- 如果同时看到上述三个 API 请求，后端初始化已经开始；再根据具体 API 的状态码和
+  响应时间排查配置、数据库或扫描任务。
+- `app.js` 内的视觉增强模块不能作为主入口的静态硬依赖。液态玻璃仍需保留，但应
+  使用带版本参数的绝对路径动态加载，并捕获失败，让岗位雷达初始化不被视觉增强阻断。
+
+当前资源应统一使用同一个缓存版本，例如：
+
+```text
+/static/css/app.css?v=20260725-companycards5
+/static/css/liquid-glass.css?v=20260725-companycards5
+/static/js/app.js?v=20260725-companycards5
+/static/js/liquid-glass.js?v=20260725-companycards5
+```
+
+旧版本出现在浏览器缓存中不等于多个版本会同时执行；只有当前 HTML 引用的 URL
+会参与本次页面加载。修改缓存版本后必须停止旧服务并重新运行 `fresh`，然后使用
+终端打印的新地址，避免把旧端口或旧沙盒当成当前代码。`status` 仅检查虚拟环境
+解释器是否存在，若安装过程曾被中断，应直接重新运行 `fresh`。
+
 ### 建议的常见验收顺序
 
 一次 UI 改动建议按以下顺序检查：
