@@ -14,6 +14,7 @@ from .models import Job
 
 
 GIVEMEOC_URL = "https://www.givemeoc.com/"
+GIVEMEOC_MAX_SCAN_PAGES = 25
 
 @dataclass(frozen=True, slots=True)
 class GiveMeOCRecord:
@@ -325,7 +326,7 @@ class GiveMeOCCrawler:
         configured = self.config.get("givemeoc", {}).get(
             "max_pages_init" if mode == "init" else "max_pages_daily"
         )
-        return max(1, min(int(configured or discovered), discovered or 1))
+        return max(1, min(int(configured or discovered), discovered or 1, GIVEMEOC_MAX_SCAN_PAGES))
 
 
 def match_givemeoc_record(

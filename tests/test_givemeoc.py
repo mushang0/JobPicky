@@ -306,3 +306,30 @@ def test_unmatched_job_links_are_cleared_only_on_complete_snapshot():
     apply_givemeoc_links([job], complete)
     assert job.official_url is None
     assert job.announcement_url is None
+def test_givemeoc_scan_has_a_hard_page_limit():
+    requested = []
+
+    class Response:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    def get(url, **_kwargs):
+        requested.append(url)
+        page = url.split("paged=")[-1] if "paged=" in url else "1"
+        return Response(
+            f'<a href="?paged=40">40</a><tr data-id="noise-{page}">'
+            f'<td class="crt-col-company">Noise {page}</td></tr>'
+        )
+
+    result = GiveMeOCCrawler(
+        {"givemeoc": {"max_pages_init": 999}, "system_taxonomy": {"company_aliases": {}}},
+        get=get,
+        sleep=lambda _seconds: None,
+    ).crawl([Job(company="Missing Company")], mode="init")
+
+    assert result.pages_scanned == 25
+    assert len(requested) == 25
+    assert result.complete is False

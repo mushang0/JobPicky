@@ -31,10 +31,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "givemeoc": {
         "enabled": True,
-        # Initial seed snapshots cover the first 40 pages; daily scans use 0
-        # and stop when they reach a page already fully present in the cache.
-        "max_pages_init": 40,
-        "max_pages_daily": 0,
+        # Both initial and daily GiveMeOC scans are bounded; daily scans may
+        # still stop earlier when they reach a fully cached page.
+        "max_pages_init": 25,
+        "max_pages_daily": 25,
         "stop_when_page_cached": True,
         "cache_only": False,
         "min_interval_seconds": 0.2,
