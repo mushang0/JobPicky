@@ -77,10 +77,10 @@ def test_canonical_source_preserves_every_seed_job_value_and_null(tmp_path: Path
         assert snapshot["columns"] == columns
         assert [[row[column] for column in columns] for row in snapshot["rows"]] == [list(row) for row in rows]
     jobs = document["tables"]["jobs"]["rows"]
-    assert all(len(job["summary"] or "") <= 96 for job in jobs)
-    assert all(job["collected_date"] <= "2026-07-23" for job in jobs)
+    assert all(len(job["summary"] or "") <= 500 for job in jobs)
+    assert all(job["collected_date"] <= "2026-07-26" for job in jobs)
     assert all(job["last_checked"] is None for job in jobs)
-    assert all(job["extraction_version"] == "detail-structure-v3" for job in jobs)
+    assert all(job["extraction_version"] in {"detail-structure-v3", "official-jsonld-v1"} for job in jobs)
 
 
 def test_built_seed_matches_source_and_initializes_new_runtime_database(tmp_path: Path, monkeypatch):

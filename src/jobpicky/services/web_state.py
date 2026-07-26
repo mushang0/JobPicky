@@ -19,6 +19,7 @@ from ..locations import location_options
 from ..organizations import organization_options
 from ..paths import AppPaths
 from ..core import DatabaseBootstrapService, JobQueryService
+from ..storage import JobRepository
 from ..wondercv import extract_wondercv_card_summary
 from ..workspace_schema import desired_workspace
 
@@ -26,6 +27,12 @@ from ..workspace_schema import desired_workspace
 class WebStateService:
     def __init__(self, paths: AppPaths):
         self.paths = paths
+
+    def ensure_database_ready(self) -> None:
+        if self.paths.database.is_file():
+            repository = JobRepository(self.paths.database)
+            repository.init_schema()
+            repository.consolidate_official_jobs_into_wondercv()
 
     def preferences(self) -> dict[str, Any]:
         config = load_config(self.paths.config)
@@ -250,18 +257,36 @@ class WebStateService:
             rows[0] if rows else {"company": group.get("company", "")},
         )
         primary = dict(primary_row)
-        titles = [row.get("matched_position_title") or row.get("title") for row in rows]
-        titles = list(dict.fromkeys(title for title in titles if title))
+        cities = list(dict.fromkeys(
+            city.strip()
+            for row in rows
+            for city in str(row.get("city") or row.get("location_text") or "").replace("，", ";").split(";")
+            if city.strip()
+        ))
+        titles = [
+            str(row.get("matched_position_title") or row.get("first_position_title") or "").strip()
+            for row in rows
+        ]
+        titles = list(dict.fromkeys(
+            title for title in titles
+            if title and title.casefold() != str(group.get("company") or "").strip().casefold()
+        ))
+        card_summary = next(
+            (str(row.get("card_summary") or "").strip() for row in rows if str(row.get("card_summary") or "").strip()),
+            "",
+        )
         primary.update({
             "company": group.get("company") or primary.get("company", ""),
             "company_key": group["company_key"],
             "jobs": rows,
             "job_count": min(3, len(self._collapse_company_jobs(rows))),
             "position_count": len(titles),
-            "position_titles": titles,
-            "matched_position_title": titles[0] if titles else "",
+            "cities": cities[:2],
+            "featured_position": titles[0] if titles else "",
+            "card_summary": card_summary,
         })
         return primary
+
 
     def jobs(self, *, page: int = 1, page_size: int = 25, scope: str = "all", query: str = "",
              city: str = "", province: str = "", batch: str = "", direction: str = "", deadline_status: str = "",
@@ -349,6 +374,12 @@ class WebStateService:
             (str(job.get("card_summary") or "").strip() for job in collapsed if str(job.get("card_summary") or "").strip()),
             card.get("card_summary") or "",
         )
+        card["cities"] = list(dict.fromkeys(
+            city.strip()
+            for job in collapsed
+            for city in str(job.get("city") or job.get("location_text") or "").replace("，", ";").split(";")
+            if city.strip()
+        ))
         position_titles = list(dict.fromkeys(
             str(position.get("title") or "").strip()
             for job in collapsed
@@ -361,6 +392,7 @@ class WebStateService:
         card["announcement_links"] = announcement_links
         card["official_url"] = official_url or None
         return card
+
 
     def scan_status(self, active_task: dict[str, Any] | None = None,
                     recent_task: dict[str, Any] | None = None) -> dict[str, Any]:

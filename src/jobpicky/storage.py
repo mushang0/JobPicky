@@ -679,6 +679,50 @@ class JobRepository:
                 ).fetchall()
             ]
 
+    def consolidate_official_jobs_into_wondercv(self) -> tuple[int, int]:
+        """Move official positions onto their GiveMeOC-matched WonderCV row."""
+        with self.connect() as conn:
+            parents = {
+                str(row["givemeoc_record_id"]): int(row["id"])
+                for row in conn.execute(
+                    "SELECT id, givemeoc_record_id FROM jobs WHERE LOWER(source) = 'wondercv'"
+                )
+                if row["givemeoc_record_id"]
+            }
+            official_rows = conn.execute(
+                "SELECT id, givemeoc_record_id FROM jobs WHERE LOWER(source) = 'official'"
+            ).fetchall()
+            official_ids = [int(row["id"]) for row in official_rows]
+            transferred = 0
+            for row in official_rows:
+                parent_id = parents.get(str(row["givemeoc_record_id"] or ""))
+                if not parent_id:
+                    continue
+                for position in conn.execute(
+                    "SELECT * FROM job_positions WHERE job_id = ? ORDER BY ordinal, id",
+                    (int(row["id"]),),
+                ):
+                    values = dict(position)
+                    values.pop("id", None)
+                    values["job_id"] = parent_id
+                    columns = list(values)
+                    assignments = ", ".join(
+                        f"{column}=excluded.{column}"
+                        for column in columns if column not in {"job_id", "position_key", "created_at"}
+                    )
+                    conn.execute(
+                        f"INSERT INTO job_positions ({', '.join(columns)}) VALUES ({', '.join(':'+column for column in columns)}) "
+                        f"ON CONFLICT(job_id, position_key) DO UPDATE SET {assignments}",
+                        values,
+                    )
+                    transferred += 1
+            if official_ids:
+                placeholders = ", ".join("?" for _ in official_ids)
+                for table in ("recommended_jobs", "feishu_sync", "job_user_state", "job_matches", "job_positions"):
+                    conn.execute(f"DELETE FROM {table} WHERE job_id IN ({placeholders})", official_ids)
+                conn.execute(f"DELETE FROM jobs WHERE id IN ({placeholders})", official_ids)
+        return transferred, len(official_ids)
+
     def get_stored_job(self, job_id: int) -> dict[str, Any]:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -722,6 +766,7 @@ class JobRepository:
                 "(';' || REPLACE(COALESCE(jobs.city, ''), '；', ';') || ';') LIKE ?"
                 for _ in city_values
             ]
+
             conditions.append(f"({' OR '.join(city_conditions)})")
             params.extend(f"%;{value};%" for value in city_values)
         province_values = _filter_values(province)
@@ -788,15 +833,22 @@ class JobRepository:
         return list(groups.values())
 
     def search_company_cards(self, **filters: Any) -> tuple[list[dict[str, Any]], int]:
-        """Return a company-level read model while retaining every source job."""
+        """Return the WonderCV discovery catalogue grouped into company cards."""
         limit = int(filters.pop("limit", 25))
         offset = int(filters.pop("offset", 0))
         rows, _ = self.search_jobs(**filters, limit=100000, offset=0)
+        # GiveMeOC and official crawlers enrich a WonderCV announcement; they
+        # are never an independent discovery source for the public catalogue.
+        rows = [row for row in rows if str(row.get("source") or "").casefold() == "wondercv"]
         groups = self._group_company_rows(rows)
         return groups[offset: offset + limit], len(groups)
 
     def get_company_detail(self, company_key: str) -> dict[str, Any]:
-        groups = self._group_company_rows(self.list_all_jobs())
+        rows = [
+            row for row in self.list_all_jobs()
+            if str(row.get("source") or "").casefold() == "wondercv"
+        ]
+        groups = self._group_company_rows(rows)
         return next((group for group in groups if group["company_key"] == company_key), {})
 
     def job_facets(self) -> dict[str, list[str]]:
@@ -1012,6 +1064,13 @@ class JobRepository:
                 COALESCE(job_matches.matched_role_group_id, '') AS matched_role_group_id,
                 COALESCE(job_matches.matched_position_title, '') AS matched_position_title,
                 COALESCE(job_matches.matched_position_key, '') AS matched_position_key,
+                (
+                    SELECT job_positions.title
+                    FROM job_positions
+                    WHERE job_positions.job_id = jobs.id
+                    ORDER BY job_positions.ordinal, job_positions.id
+                    LIMIT 1
+                ) AS first_position_title,
                 COALESCE(job_matches.match_evidence, '{{}}') AS match_evidence,
                 COALESCE(job_matches.decision_trace, '[]') AS decision_trace,
                 CASE WHEN latest_recommendation.id IS NULL THEN '不推荐' ELSE '推荐' END AS recommendation_status,

@@ -243,7 +243,11 @@ class TaskManager:
 def create_app(paths: AppPaths | None = None) -> FastAPI:
     paths = paths or AppPaths.default()
     paths.ensure_runtime_directories()
+    # Read endpoints depend on the current schema too.  Without this upgrade,
+    # an existing pre-GiveMeOC database cannot render company cards at all.
     state = WebStateService(paths)
+    state.ensure_database_ready()
+
 
     def run_published_scan(config: dict, task_id: str, cancelled) -> dict[str, Any]:
         """Build a complete scan in isolation and publish it with one atomic swap."""

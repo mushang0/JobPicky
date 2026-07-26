@@ -75,7 +75,7 @@ def test_official_batch_reuses_fresh_official_jobs_without_refetching(mock_confi
     )
 
     assert batch.official_result.sources_checked == 0
-    assert batch.jobs[0].source == "official"
+    assert batch.jobs[0].source == "WonderCV"
     assert batch.jobs[0].dedupe_key == wondercv.dedupe_key
 
 
@@ -161,13 +161,13 @@ def test_official_batch_runs_match_merge_and_database_write(tmp_path, mock_confi
     assert [item.source_record_id for item in crawler.records] == ["oc-1"]
     assert batch.links_matched == 1
     assert len(batch.jobs) == 1
-    assert batch.jobs[0].source == "official"
+    assert batch.jobs[0].source == "WonderCV"
     assert batch.jobs[0].dedupe_key == wondercv.dedupe_key
     assert ingestion.new_items == 1
     assert matching.matched_items == 1
-    assert row["source"] == "official"
-    assert row["official_url"] == official.detail_url
-    assert row["official_url_source"] == "official"
+    assert row["source"] == "WonderCV"
+    assert row["official_url"] == record.official_url
+    assert row["official_url_source"] == "givemeoc"
     assert repo.list_positions(ingestion.items[0].job_id)[0]["title"] == "FPGA Engineer"
 
 
@@ -260,4 +260,4 @@ def test_seed_refresh_reuses_the_same_official_batch_pipeline(tmp_path):
             "SELECT source, dedupe_key, official_url, official_url_source, givemeoc_record_id FROM jobs WHERE dedupe_key = ?",
             ("WonderCV:id:new",),
         ).fetchone()
-    assert tuple(row) == ("official", "WonderCV:id:new", "https://jobs.lever.co/newco/1", "official", "oc-new")
+    assert tuple(row) == ("WonderCV", "WonderCV:id:new", "https://jobs.lever.co/newco", "givemeoc", "oc-new")

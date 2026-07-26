@@ -44,6 +44,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "allow_generic": False,
         "max_details_per_source": 50,
+        "max_jobs_per_source": 200,
+        "page_size": 50,
         # Different official sources may be checked in parallel, but each
         # source keeps its detail-page requests serial and rate-limited.
         "max_workers": 3,

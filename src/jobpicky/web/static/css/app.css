@@ -141,7 +141,7 @@ body{background:radial-gradient(circle at 8% 0%,rgba(67,94,135,.08),transparent 
 .job-modal-card>header .icon-button:hover{background:#eceff3}
 .drawer-content{min-height:0;overflow:auto;padding:0 30px 30px;overscroll-behavior:contain}
 .drawer-content .detail-intro{padding:0 0 22px}
-.detail-intro p{max-width:68ch;margin:0;color:#67707d;font-size:15px;line-height:1.75;white-space:normal;text-wrap:pretty}
+.detail-intro p{max-width:none;margin:0;color:#67707d;font-size:15px;line-height:1.75;white-space:normal;overflow-wrap:anywhere}
 .detail-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0}
 .drawer-content .detail-facts>div{display:flex;min-width:0;min-height:78px;flex-direction:column;align-items:center;justify-content:center;padding:12px 14px;border:0;border-radius:12px;background:rgba(255,255,255,.48);text-align:center}
 .detail-facts dd{margin:0;color:var(--text);font-size:14px;font-weight:650;line-height:1.45;overflow-wrap:anywhere}

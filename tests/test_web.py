@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime, timedelta
+import sqlite3
 
 from fastapi.testclient import TestClient
 
@@ -144,6 +145,72 @@ def test_company_detail_collapses_duplicate_wondercv_announcements(tmp_path: Pat
     assert "announcement_count" not in detail
 
 
+def test_company_card_keeps_city_summary_and_featured_position_separate(tmp_path: Path):
+    paths = AppPaths(tmp_path / "profile")
+    repo = JobRepository(paths.database)
+    repo.init_schema()
+    stored = repo.upsert_job(Job(
+        source="WonderCV",
+        source_job_id="company-card-1",
+        dedupe_key="company-card:1",
+        company="星海科技",
+        title="星海科技",
+        raw_title=(
+            "民企 人工智能 收录 2026.07.20 星海科技 "
+            "星海科技2027届校园招聘，面向应届毕业生开放研发岗位。 上海市 北京市 秋招 本科"
+        ),
+        summary="详情正文不能作为卡片摘要",
+        city="上海市;北京市;深圳市",
+        deadline="2026-09-30",
+        announcement_url="https://notice.example.com/starsea",
+        announcement_url_source="givemeoc",
+        official_url="https://jobs.example.com/starsea",
+        official_url_source="givemeoc",
+        positions=[Position(title="FPGA 工程师")],
+    ))
+    repo.save_match(stored.job_id, {"matched_position_title": "FPGA 工程师"})
+    client = TestClient(create_app(paths))
+
+    card = client.get("/api/jobs").json()["items"][0]
+    detail = client.get(f"/api/companies/{card['company_key']}").json()
+
+    assert card["cities"] == ["上海市", "北京市"]
+    assert card["featured_position"] == "FPGA 工程师"
+    assert card["card_summary"].startswith("星海科技2027届校园招聘")
+    assert "position_titles" not in card
+    assert detail["cities"] == ["上海市", "北京市", "深圳市"]
+    assert detail["deadline"] == "2026-09-30"
+    assert detail["announcement_links"] == [{"url": "https://notice.example.com/starsea"}]
+
+
+def test_web_startup_migrates_an_existing_database_before_reading_it(tmp_path: Path):
+    paths = AppPaths(tmp_path / "profile")
+    paths.ensure_runtime_directories()
+    connection = sqlite3.connect(paths.database)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY,
+                dedupe_key TEXT UNIQUE NOT NULL,
+                company TEXT,
+                title TEXT
+            );
+            INSERT INTO jobs(id, dedupe_key, company, title)
+                VALUES (1, 'legacy:1', 'Legacy Co', 'Legacy Job');
+            """
+        )
+    finally:
+        connection.close()
+
+    client = TestClient(create_app(paths))
+
+    assert client.get("/api/jobs").status_code == 200
+    with sqlite3.connect(paths.database) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+    assert "announcement_url_source" in columns
+
+
 def test_task_progress_keeps_a_bounded_unique_activity_stream(tmp_path: Path):
     manager = TaskManager(AppPaths(tmp_path / "profile"))
     manager._tasks["scan-1"] = {"task_id": "scan-1", "status": "running"}
@@ -200,6 +267,8 @@ def test_web_ui_exposes_local_first_product_structure(tmp_path: Path):
     assert "招聘公告" in script
     assert page.count('class="button secondary scan-button"') == 2
     assert 'class="button secondary" href="${escapeHtml(apply)}"' in script
+    assert 'const announcement=safeExternalUrl(company.announcement_links?.[0]?.url),official=safeExternalUrl(company.official_url)' in script
+    assert '查看招聘公告' in script
     assert 'actions.classList.toggle("action-ready",ready)' in script
     assert '岗位数量' in script
     assert '["企业性质",job.company_type]' not in script

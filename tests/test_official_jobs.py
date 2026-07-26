@@ -15,14 +15,14 @@ from jobpicky.official_jobs import (
 )
 
 
-def _detail(title="FPGA Engineer", company="Acme"):
+def _detail(title="FPGA Engineer", company="Acme", identifier="fpga-42"):
     return f"""
     <script type="application/ld+json">
     {{
       "@context": "https://schema.org", "@type": "JobPosting",
       "title": "{title}", "description": "Build and verify FPGA designs with RTL, simulation, timing closure and board bring-up. Work with hardware and verification teams.",
       "datePosted": "2026-07-20", "validThrough": "2026-09-30",
-      "identifier": {{"value": "fpga-42"}},
+      "identifier": {{"value": "{identifier}"}},
       "hiringOrganization": {{"name": "{company}"}},
       "jobLocation": {{"address": {{"addressLocality": "Shenzhen"}}}}
     }}
@@ -136,6 +136,50 @@ def test_crawler_parses_platform_api_job_payload_and_deduplicates_it():
     assert result.details_checked == 1
 
 
+def test_feishu_crawler_reads_following_pages_until_the_result_is_short():
+    listing = "<html><body><div id='app'></div></body></html>"
+
+    def payload(start, count):
+        return {"data": {"job_post_list": [{
+            "id": f"feishu-{index}",
+            "title": f"Engineer {index}",
+            "description": "Build and verify hardware systems with testing and delivery ownership. " * 2,
+            "location": "Shanghai",
+        } for index in range(start, start + count)]}}
+
+    class Response:
+        def __init__(self, text, data=None):
+            self.text = text
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    calls = []
+
+    def get(url, **_kwargs):
+        calls.append(url)
+        if "offset=0" in url:
+            return Response("ignored", payload(0, 2))
+        if "offset=2" in url:
+            return Response("ignored", payload(2, 1))
+        return Response(listing)
+
+    result = OfficialJobCrawler(
+        {"official_jobs": {"max_jobs_per_source": 6, "page_size": 2}},
+        get=get,
+        sleep=lambda _: None,
+    ).crawl([type("Record", (), {"company": "Acme", "official_url": "https://acme.jobs.feishu.cn/campus"})()])
+
+    assert len(result.jobs) == 3
+    assert any("offset=0" in url for url in calls)
+    assert any("offset=2" in url for url in calls)
+    assert not any("offset=4" in url for url in calls)
+
+
 def test_zhiye_crawler_posts_to_real_job_list_api_shape():
     listing = '<html><script>var x={"PortalId":"portal-42"}</script></html>'
     payload = {
@@ -238,7 +282,7 @@ def test_mokahr_crawler_decrypts_detail_api_and_uses_stable_job_id():
     assert "FPGA" in result.jobs[0].raw_text
 
 
-def test_official_job_replaces_matching_wondercv_job_but_keeps_one_key():
+def test_official_job_enriches_matching_wondercv_job_without_changing_its_source():
     wondercv = Job(
         source="WonderCV",
         source_job_id="wonder-1",
@@ -259,28 +303,46 @@ def test_official_job_replaces_matching_wondercv_job_but_keeps_one_key():
     merged = merge_official_jobs([wondercv], [official])
 
     assert len(merged) == 1
-    assert merged[0].source == "official"
+    assert merged[0].source == "WonderCV"
     assert merged[0].dedupe_key == wondercv.dedupe_key
-    assert merged[0].summary.startswith("Build and verify")
+    assert merged[0].summary == "list card"
     assert merged[0].raw_title == wondercv.raw_title
+    assert merged[0].positions[0].title == "FPGA Engineer"
 
 
-def test_repeated_refresh_updates_previously_merged_official_row_without_duplicate():
-    previous = parse_official_job(
+def test_official_job_without_wondercv_parent_is_discarded():
+    official = parse_official_job(
         _detail(),
         source_url="https://careers.acme.example/jobs",
         detail_url="https://careers.acme.example/jobs/fpga-42",
         company="Acme",
     )
-    refreshed = parse_official_job(
+    assert merge_official_jobs([], [official]) == []
+
+
+def test_repeated_official_positions_share_one_wondercv_parent():
+    wondercv = Job(
+        source="WonderCV",
+        source_job_id="wonder-1",
+        dedupe_key="WonderCV:id:wonder-1",
+        company="Acme",
+        title="Acme 2027 campus recruitment",
+    )
+    first = parse_official_job(
         _detail("FPGA Engineer"),
         source_url="https://careers.acme.example/jobs",
         detail_url="https://careers.acme.example/jobs/fpga-42",
         company="Acme",
     )
-    previous = replace(previous, dedupe_key="WonderCV:id:wonder-1")
+    second = parse_official_job(
+        _detail("Hardware Engineer", identifier="hardware-43"),
+        source_url="https://careers.acme.example/jobs",
+        detail_url="https://careers.acme.example/jobs/hardware-43",
+        company="Acme",
+    )
 
-    merged = merge_official_jobs([], [refreshed], [previous])
+    merged = merge_official_jobs([wondercv], [first, second])
 
     assert len(merged) == 1
-    assert merged[0].dedupe_key == "WonderCV:id:wonder-1"
+    assert merged[0].source == "WonderCV"
+    assert {position.title for position in merged[0].positions} == {"FPGA Engineer", "Hardware Engineer"}

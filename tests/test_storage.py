@@ -112,6 +112,65 @@ def test_repository_stores_multiple_structured_positions_under_one_announcement(
     assert repo.get_job_detail(result.job_id)["positions"] == positions
 
 
+def test_repository_consolidates_official_rows_into_their_wondercv_parent(tmp_path: Path):
+    repo = JobRepository(tmp_path / "jobs.sqlite")
+    repo.init_schema()
+    parent = repo.upsert_job(Job(
+        source="WonderCV",
+        dedupe_key="wondercv:parent",
+        company="Example Co",
+        title="Example Co campus recruitment",
+        givemeoc_record_id="givemeoc:example",
+        positions=[Position(title="Algorithm Engineer")],
+    ))
+    repo.upsert_job(Job(
+        source="official",
+        dedupe_key="official:child",
+        company="Example Co",
+        title="FPGA Engineer",
+        givemeoc_record_id="givemeoc:example",
+        positions=[Position(title="FPGA Engineer", position_key="official:fpga")],
+    ))
+    repo.upsert_job(Job(
+        source="official",
+        dedupe_key="official:orphan",
+        company="Orphan Co",
+        title="Orphan role",
+        positions=[Position(title="Orphan role", position_key="official:orphan")],
+    ))
+
+    transferred, deleted = repo.consolidate_official_jobs_into_wondercv()
+
+    assert (transferred, deleted) == (1, 2)
+    assert [row["source"] for row in repo.list_stored_jobs()] == ["WonderCV"]
+    assert {position["title"] for position in repo.list_positions(parent.job_id)} == {
+        "Algorithm Engineer", "FPGA Engineer",
+    }
+
+
+def test_company_catalogue_never_uses_official_rows_as_discovery_records(tmp_path: Path):
+    repo = JobRepository(tmp_path / "jobs.sqlite")
+    repo.init_schema()
+    repo.upsert_job(Job(
+        source="WonderCV",
+        dedupe_key="wondercv:visible",
+        company="Visible Co",
+        title="Visible Co campus recruitment",
+    ))
+    repo.upsert_job(Job(
+        source="official",
+        dedupe_key="official:hidden",
+        company="Official-only Co",
+        title="Official-only role",
+    ))
+
+    cards, total = repo.search_company_cards()
+
+    assert total == 1
+    assert [card["company"] for card in cards] == ["Visible Co"]
+    assert repo.get_company_detail("official-only-co") == {}
+
+
 def test_empty_retry_does_not_delete_previously_extracted_positions(tmp_path: Path):
     repo = JobRepository(tmp_path / "jobs.sqlite")
     repo.init_schema()

@@ -176,10 +176,17 @@ def _job_payloads(value: Any) -> list[dict[str, Any]]:
     return list(unique.values())
 
 
-def _api_paths(platform: str | None, source_url: str, limit: int) -> tuple[str, ...]:
+def _api_paths(
+    platform: str | None, source_url: str, limit: int, page_size: int = 50,
+) -> tuple[str, ...]:
     base = f"{urlsplit(source_url).scheme}://{urlsplit(source_url).netloc}"
+    page_size = max(1, min(page_size, limit))
+    feishu_pages = tuple(
+        f"{base}/api/v1/search/job/posts?keyword=&limit={page_size}&offset={offset}&portal_type=3"
+        for offset in range(0, limit, page_size)
+    )
     paths = {
-        "feishu": (f"{base}/api/v1/search/job/posts?keyword=&limit={limit}&offset=0&portal_type=3",),
+        "feishu": feishu_pages,
         "zhiye": (f"{base}/api/position/list", f"{base}/api/job/list", f"{base}/api/jobs"),
         "mokahr": (f"{base}/api/position/list", f"{base}/api/job/list", f"{base}/api/jobs"),
     }
@@ -406,7 +413,10 @@ class OfficialJobCrawler:
     def crawl(self, records: Iterable[Any]) -> OfficialCrawlResult:
         records = self._unique_records(records)
         aliases = self.config.get("system_taxonomy", {}).get("company_aliases", {})
-        limit = max(1, int(self.config.get("official_jobs", {}).get("max_details_per_source", 50)))
+        official_config = self.config.get("official_jobs", {})
+        limit = max(1, int(official_config.get(
+            "max_jobs_per_source", official_config.get("max_details_per_source", 50),
+        )))
         configured_workers = int(self.config.get("official_jobs", {}).get("max_workers", 8) or 8)
         max_workers = max(1, min(configured_workers, 10))
         if max_workers > 1 and len(records) > 1:
@@ -588,22 +598,31 @@ class OfficialJobCrawler:
     ) -> list[Job]:
         payloads = _embedded_payloads(BeautifulSoup(html, "html.parser"))
         context = _page_context(html, platform)
+        official_config = self.config.get("official_jobs", {})
+        page_size = max(1, min(
+            int(official_config.get("page_size", 50) or 50), limit,
+        ))
         if platform == "zhiye":
-            payload = self._fetch_json(
-                f"{urlsplit(source_url).scheme}://{urlsplit(source_url).netloc}/api/Jobad/GetJobAdPageList",
-                source_url,
-                method="POST",
-                json_body={
-                    "PageIndex": 0,
-                    "PageSize": limit,
-                    "KeyWords": "",
-                    "SpecialType": 0,
-                    "PortalId": self._zhiye_portal_id(html),
-                    "DisplayFields": ["Category"],
-                },
-            )
-            if payload is not None:
+            endpoint = f"{urlsplit(source_url).scheme}://{urlsplit(source_url).netloc}/api/Jobad/GetJobAdPageList"
+            for page_index in range((limit + page_size - 1) // page_size):
+                payload = self._fetch_json(
+                    endpoint,
+                    source_url,
+                    method="POST",
+                    json_body={
+                        "PageIndex": page_index,
+                        "PageSize": page_size,
+                        "KeyWords": "",
+                        "SpecialType": 0,
+                        "PortalId": self._zhiye_portal_id(html),
+                        "DisplayFields": ["Category"],
+                    },
+                )
+                if payload is None:
+                    break
                 payloads.append(payload)
+                if len(_job_payloads(payload)) < page_size:
+                    break
         if platform == "mokahr":
             init_jobs = next((item.get("jobs") for item in payloads if isinstance(item, dict) and isinstance(item.get("jobs"), list)), [])
             for item in init_jobs[:limit]:
@@ -625,13 +644,17 @@ class OfficialJobCrawler:
                 if payload is not None:
                     payloads.append(_decrypt_mokahr_payload(payload, context))
         if platform not in {"zhiye", "mokahr"}:
-            for path in _api_paths(platform, source_url, limit):
+            for path in _api_paths(platform, source_url, limit, page_size):
                 payload = self._fetch_json(path, source_url)
                 if payload is not None:
                     payloads.append(payload)
+                    if platform == "feishu" and len(_job_payloads(payload)) < page_size:
+                        break
         jobs: list[Job] = []
         for payload in payloads:
-            for data in _job_payloads(payload)[:limit]:
+            for data in _job_payloads(payload):
+                if len(jobs) >= limit:
+                    return jobs
                 job = _job_from_payload(
                     data,
                     source_url=source_url,
@@ -729,90 +752,56 @@ def merge_official_jobs(
     existing_jobs: Iterable[Job] = (),
     aliases: dict[str, list[str]] | None = None,
 ) -> list[Job]:
+    """Attach official positions to WonderCV announcements without creating jobs.
+
+    WonderCV is the discovery baseline.  Official sources may improve the
+    positions beneath an existing announcement, but an unmatched official
+    company must never become a new card in the library.
+    """
     result = list(wondercv_jobs)
-    candidates = [*result, *existing_jobs]
+    candidates = [
+        job for job in [*result, *existing_jobs]
+        if str(job.source or "").casefold() != "official"
+    ]
     by_key = {job.dedupe_key: index for index, job in enumerate(result) if job.dedupe_key}
-    candidate_order = {id(job): index for index, job in enumerate(candidates)}
-    active = {id(job) for job in candidates}
-    current_candidates = {id(job) for job in result}
-    official_by_dedupe: dict[str, list[Job]] = {}
-    official_by_detail: dict[str, list[Job]] = {}
-    nonofficial_by_title: dict[str, list[Job]] = {}
-
-    def add_candidate(job: Job) -> None:
-        if job.source == "official":
-            if job.dedupe_key:
-                official_by_dedupe.setdefault(job.dedupe_key, []).append(job)
-            if job.detail_url:
-                official_by_detail.setdefault(job.detail_url, []).append(job)
-        else:
-            nonofficial_by_title.setdefault(_title_key(job.clean_title or job.title), []).append(job)
-
+    by_givemeoc_record: dict[str, list[Job]] = {}
     for candidate in candidates:
-        add_candidate(candidate)
+        if candidate.givemeoc_record_id:
+            by_givemeoc_record.setdefault(candidate.givemeoc_record_id, []).append(candidate)
 
-    def first_active(items: Iterable[Job], allowed: set[int] | None = None) -> Job | None:
-        matches = [
-            item for item in items
-            if id(item) in active and (allowed is None or id(item) in allowed)
-        ]
-        return min(matches, key=lambda item: candidate_order[id(item)]) if matches else None
+    def target_for(official: Job) -> Job | None:
+        if official.givemeoc_record_id:
+            matched = by_givemeoc_record.get(official.givemeoc_record_id, ())
+            if matched:
+                return matched[0]
+        return next((
+            candidate for candidate in candidates
+            if _company_matches(official.company, candidate.company, aliases)
+            and _locations_compatible(official.city, candidate.city)
+        ), None)
 
-    def first_nonofficial(title_key: str, allowed: set[int] | None = None) -> Job | None:
-        for candidate in nonofficial_by_title.get(title_key, ()):
-            if (
-                id(candidate) in active
-                and (allowed is None or id(candidate) in allowed)
-                and _company_matches(official.company, candidate.company, aliases)
-                and _locations_compatible(official.city, candidate.city)
-            ):
-                return candidate
-        return None
+    def merged_positions(current: list[Position], incoming: list[Position]) -> list[Position]:
+        positions: dict[str, Position] = {}
+        for position in [*current, *incoming]:
+            key = (position.position_key or _title_key(position.title)).casefold()
+            positions.setdefault(key or str(len(positions)), position)
+        return list(positions.values())
+
+    merged_targets: dict[str, Job] = {}
 
     for official in official_jobs:
-        exact_candidates: list[Job] = []
-        if official.dedupe_key:
-            exact_candidates.extend(official_by_dedupe.get(official.dedupe_key, ()))
-        if official.detail_url:
-            exact_candidates.extend(official_by_detail.get(official.detail_url, ()))
-        match = first_active(exact_candidates, current_candidates)
-        if match is None:
-            match = first_nonofficial(_title_key(official.title), current_candidates)
-        if match is None:
-            match = first_active(exact_candidates)
-        if match is None:
-            match = first_nonofficial(_title_key(official.title))
-        if match:
-            merged = replace(
-                official,
-                dedupe_key=match.dedupe_key,
-                raw_title=match.raw_title or official.raw_title,
-                batch=official.batch or match.batch,
-                target_graduate_year=official.target_graduate_year or match.target_graduate_year,
-                degree=official.degree or match.degree,
-                tags=official.tags or match.tags,
-                job_tags=official.job_tags or match.job_tags,
-                announcement_url=match.announcement_url,
-                announcement_url_source=match.announcement_url_source,
-                givemeoc_record_id=match.givemeoc_record_id,
-                positions=official.positions or match.positions,
-            )
-            if merged.dedupe_key in by_key:
-                result[by_key[merged.dedupe_key]] = merged
-            else:
-                result.append(merged)
-                by_key[merged.dedupe_key] = len(result) - 1
-            active.discard(id(match))
-            candidate_order[id(merged)] = len(candidate_order)
-            add_candidate(merged)
-            active.add(id(merged))
-            current_candidates.add(id(merged))
+        match = target_for(official)
+        if match is None or not match.dedupe_key:
+            continue
+        current = merged_targets.get(match.dedupe_key, match)
+        merged = replace(
+            current,
+            positions=merged_positions(current.positions or [], official.positions or []),
+        )
+        merged_targets[match.dedupe_key] = merged
+        if match.dedupe_key in by_key:
+            result[by_key[match.dedupe_key]] = merged
         else:
-            result.append(official)
-            if official.dedupe_key:
-                by_key[official.dedupe_key] = len(result) - 1
-            add_candidate(official)
-            active.add(id(official))
-            candidate_order[id(official)] = len(candidate_order)
-            current_candidates.add(id(official))
+            result.append(merged)
+            by_key[match.dedupe_key] = len(result) - 1
     return result
