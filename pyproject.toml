@@ -1,6 +1,6 @@
 [project]
 name = "jobpicky"
-version = "0.5.0"
+version = "0.6.0"
 description = "JobPicky - Your personalized job radar"
 readme = "README.md"
 license = "MIT"
